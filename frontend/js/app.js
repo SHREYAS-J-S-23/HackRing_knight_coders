@@ -197,6 +197,7 @@ document.addEventListener('DOMContentLoaded', () => {
       tabUploadLink.classList.remove('active');
       if (panelUploadFile) panelUploadFile.classList.remove('hidden');
       if (panelUploadLink) panelUploadLink.classList.add('hidden');
+      if (state.selectedFile && videoPreviewBar) videoPreviewBar.classList.remove('hidden');
     });
 
     tabUploadLink.addEventListener('click', () => {
@@ -204,6 +205,7 @@ document.addEventListener('DOMContentLoaded', () => {
       tabUploadFile.classList.remove('active');
       if (panelUploadLink) panelUploadLink.classList.remove('hidden');
       if (panelUploadFile) panelUploadFile.classList.add('hidden');
+      if (videoPreviewBar) videoPreviewBar.classList.add('hidden');
       if (videoUrlInput) videoUrlInput.focus();
     });
   }
@@ -263,26 +265,32 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Sample Founder Video Demo Button
-  useSampleDemoBtn.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    setProcessing(true, "Loading Sample Video...", "Fetching raw video recording...", 15, 'upload');
-    try {
-      const response = await fetch(`${state.apiBase}/static/uploads/sample_raw.mp4`);
-      if (!response.ok) throw new Error("Sample file not available.");
-      const blob = await response.blob();
-      const sampleFile = new File([blob], 'founder_walkthrough_raw.mp4', { type: 'video/mp4' });
-      handleFileSelected(sampleFile);
-      setProcessing(false);
-      startPipelineBtn.click();
-    } catch (e) {
-      console.warn("Falling back to local video file selection:", e);
-      setProcessing(false);
-      fileInput.click();
-    }
-  });
+  if (useSampleDemoBtn) {
+    useSampleDemoBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      setProcessing(true, "Loading Sample Video...", "Fetching raw video recording...", 15, 'upload');
+      try {
+        const response = await fetch(`${state.apiBase}/static/uploads/sample_raw.mp4`);
+        if (!response.ok) throw new Error("Sample file not available.");
+        const blob = await response.blob();
+        const sampleFile = new File([blob], 'founder_walkthrough_raw.mp4', { type: 'video/mp4' });
+        handleFileSelected(sampleFile);
+        setProcessing(false);
+        startPipelineBtn.click();
+      } catch (e) {
+        console.warn("Falling back to local video file selection:", e);
+        setProcessing(false);
+        fileInput.click();
+      }
+    });
+  }
 
   // Start Pipeline / Indexing Button
   startPipelineBtn.addEventListener('click', async () => {
+    if (tabUploadLink && tabUploadLink.classList.contains('active') && videoUrlInput && videoUrlInput.value.trim()) {
+      await importAndIndexVideoUrl(videoUrlInput.value.trim());
+      return;
+    }
     if (!state.selectedFile) return;
     await uploadAndIndexVideo();
   });
@@ -407,9 +415,22 @@ document.addEventListener('DOMContentLoaded', () => {
     // Render all separate scenes/topics from the video with clip cuts and option to merge!
     renderAllScenes(state.allDiscoveredTopics);
 
-    setTimeout(() => {
-      if (topicsDashboardCard) topicsDashboardCard.scrollIntoView({ behavior: 'smooth' });
-    }, 300);
+    // Automatically generate clips for discovered topics so the editing studio opens immediately with cuts ready!
+    if (state.allDiscoveredTopics && state.allDiscoveredTopics.length > 0) {
+      const topIds = state.allDiscoveredTopics.map(t => t.id);
+      try {
+        await generateClips(topIds);
+      } catch (clipErr) {
+        console.warn("Initial clip generation deferred:", clipErr);
+        setTimeout(() => {
+          if (topicsDashboardCard) topicsDashboardCard.scrollIntoView({ behavior: 'smooth' });
+        }, 300);
+      }
+    } else {
+      setTimeout(() => {
+        if (topicsDashboardCard) topicsDashboardCard.scrollIntoView({ behavior: 'smooth' });
+      }, 300);
+    }
   }
 
   async function uploadAndIndexVideo() {
@@ -455,11 +476,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function importAndIndexVideoUrl(url) {
     if (!url || !url.trim()) {
+      showToast("Please enter a valid video link.", "warning");
       alert("Please enter a valid video link.");
       return;
     }
     const cleanUrl = url.trim();
     if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+      showToast("Please provide a valid web link starting with http:// or https://", "warning");
       alert("Please provide a valid web link starting with http:// or https://");
       return;
     }
@@ -471,9 +494,19 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    // Crucial: Clear any previous local file selection so all video players stream the link video!
+    state.selectedFile = null;
+    if (fileInput) fileInput.value = '';
+    if (videoPreviewBar) videoPreviewBar.classList.add('hidden');
+
     setProcessing(true, "Importing Video from Link...", "Downloading stream with yt-dlp & extracting audio with FFmpeg...", 20, 'upload');
     updateStepIndicator(1);
     setStagePill('upload');
+
+    // Immediately redirect / scroll to the processing pipeline so user sees active progress
+    if (processingCard) {
+      processingCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
 
     try {
       setStagePill('audio');
@@ -495,9 +528,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (videoFileName) videoFileName.textContent = ingestData.filename;
       if (videoFileStats) videoFileStats.textContent = `${formatTime(state.duration)} • Imported from link`;
-      if (videoPreviewBar) videoPreviewBar.classList.remove('hidden');
 
-      // Seamlessly execute Whisper Transcription & Semantic Graph Indexing
+      // Immediately display the video in the Video Studio player so the user sees the video right away!
+      const streamUrl = getAuthenticatedMediaUrl(`${state.apiBase}/api/videos/${state.videoId}/stream`);
+      if (finalVideoPlayer) {
+        finalVideoPlayer.src = streamUrl;
+        finalVideoPlayer.load();
+      }
+      if (outputSection) {
+        outputSection.classList.remove('hidden');
+        outputSection.scrollIntoView({ behavior: 'smooth' });
+      }
+      if (nowPlayingLabel) {
+        nowPlayingLabel.textContent = `Streaming: ${escapeHtml(state.videoTitle)}`;
+      }
+
+      // Seamlessly execute Whisper Transcription, Semantic Graph & Topic Clipping
       await runAnalysisPipeline(state.videoId, state.duration);
 
     } catch (err) {
@@ -854,65 +900,38 @@ document.addEventListener('DOMContentLoaded', () => {
       const startMinSec = formatTime(t.start_time);
       const endMinSec = formatTime(t.end_time);
 
-      const subtopicsHtml = (t.subtopics || []).slice(0, 4).map(sub => `
-        <span class="subtopic-item"><i class="fa-solid fa-check text-green"></i> ${escapeHtml(sub)}</span>
-      `).join('');
-
-      const whyHtml = (t.why_selected || []).slice(0, 4).map(w => `
-        <div class="why-item"><i class="fa-solid fa-check"></i> <span>${escapeHtml(w)}</span></div>
-      `).join('');
-
       card.innerHTML = `
-        <div>
+        <div class="topic-card-body">
           <div class="topic-header-row">
-            <div>
-              <span class="topic-rank-num">${rankStr}</span>
-              <h3 class="topic-name">${escapeHtml(t.name)}</h3>
+            <div class="topic-title-group">
+              <span class="topic-rank-badge">${rankStr}</span>
+              <h4 class="topic-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</h4>
             </div>
             <span class="topic-time-badge"><i class="fa-regular fa-clock"></i> ${startMinSec} — ${endMinSec}</span>
           </div>
 
-          <div class="topic-scores-strip" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-            <span class="score-pill score-importance">Importance ${(t.importance_score * 100).toFixed(0)}%</span>
-            <span class="score-pill score-confidence">Confidence ${(t.confidence * 100).toFixed(0)}%</span>
-            ${(t.exchange_type && t.exchange_type !== 'GENERAL_TOPIC') ? `
-              <span class="badge badge-podcast">
-                <i class="fa-solid fa-podcast"></i> ${escapeHtml(t.exchange_type.replace(/_/g, ' '))}
-              </span>
-            ` : ''}
-          </div>
-
           ${(t.speakers_involved && t.speakers_involved.length > 0) ? `
-          <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center;">
-            ${t.speakers_involved.map(spk => {
-              const role = (t.speaker_roles && t.speaker_roles[spk]) ? ` • ${t.speaker_roles[spk]}` : '';
-              return `<span class="badge badge-speaker"><i class="fa-solid fa-user"></i> ${escapeHtml(spk)}${role}</span>`;
-            }).join('')}
-            ${t.question_included ? `<span class="badge badge-success" style="font-size:0.7rem; padding:1px 6px;"><i class="fa-solid fa-circle-question"></i> Question Preserved</span>` : ''}
+          <div class="topic-speaker-row">
+            ${t.speakers_involved.map(spk => `<span class="badge badge-speaker"><i class="fa-solid fa-user"></i> ${escapeHtml(spk)}</span>`).join('')}
           </div>
           ` : ''}
 
-          ${t.editorial_justification ? `
-          <div style="margin-top: 8px; font-size: 0.78rem; color: #c7d2fe; background: rgba(99, 102, 241, 0.08); padding: 6px 10px; border-radius: var(--radius-sm); border-left: 3px solid var(--accent-primary); line-height: 1.4;">
-            <i class="fa-solid fa-feather-pointed"></i> <strong>Editorial Insight:</strong> ${escapeHtml(t.editorial_justification)}
-          </div>
-          ` : ''}
-
-          <div class="subtopics-box">
-            <div class="subtopics-label">Subtopics & Concepts</div>
-            <div class="subtopics-badges">${subtopicsHtml || '<span class="subtopic-item">Core Concept</span>'}</div>
+          <div class="topic-key-insight-box">
+            <div class="key-insight-tag"><i class="fa-solid fa-bolt icon-accent"></i> Key Insight</div>
+            <p class="key-insight-text">${escapeHtml(t.key_information || t.name)}</p>
           </div>
 
-          ${t.key_information ? `
-          <div class="subtopics-box" style="margin-top: 6px;">
-            <div class="subtopics-label"><i class="fa-solid fa-bolt icon-accent"></i> Key Insight</div>
-            <p style="font-size:0.82rem; color:var(--text-secondary); margin: 3px 0 0 0; line-height: 1.4;">${escapeHtml(t.key_information)}</p>
-          </div>
-          ` : ''}
-
-          <div class="why-selected-box">
-            <div class="why-selected-label"><i class="fa-solid fa-sparkles"></i> Why Vidara Selected This</div>
-            <div class="why-selected-list">${whyHtml}</div>
+          <!-- Inline Card Video Player (Plays Right Here in Card) -->
+          <div class="topic-inline-player-box hidden" id="inline_player_${t.id}">
+            <div class="inline-video-wrapper">
+              <video class="inline-preview-video" id="inline_video_${t.id}" playsinline controls preload="metadata"></video>
+              <div class="inline-player-bar">
+                <span class="inline-player-title">${escapeHtml(t.name)} (${startMinSec} — ${endMinSec})</span>
+                <button type="button" class="btn-close-inline" data-topic-id="${t.id}" title="Close preview">
+                  <i class="fa-solid fa-xmark"></i> Close
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -921,14 +940,14 @@ document.addEventListener('DOMContentLoaded', () => {
             <input type="checkbox" class="topic-checkbox" data-topic-id="${t.id}" checked />
             <span>Select</span>
           </label>
-          <div style="display: flex; gap: 8px;">
-            <button class="btn-ghost btn-sm preview-topic-btn" data-start="${t.start_time}" data-end="${t.end_time}" data-title="${escapeHtml(t.name)}">
+          <div class="topic-btn-group">
+            <button type="button" class="btn-ghost btn-topic-action preview-topic-btn" data-topic-id="${t.id}" data-start="${t.start_time}" data-end="${t.end_time}" data-title="${escapeHtml(t.name)}">
               <i class="fa-solid fa-play"></i> Preview
             </button>
-            <button class="btn-ghost btn-sm save-topic-btn" data-topic-id="${t.id}" data-title="${escapeHtml(t.name)}" data-start="${t.start_time}" data-end="${t.end_time}" title="Save clip permanently to My Library">
+            <button type="button" class="btn-ghost btn-topic-action save-topic-btn" data-topic-id="${t.id}" data-title="${escapeHtml(t.name)}" data-start="${t.start_time}" data-end="${t.end_time}" title="Save clip permanently to My Library">
               <i class="fa-regular fa-bookmark"></i> Save
             </button>
-            <button class="btn-primary btn-sm generate-single-clip-btn" data-topic-id="${t.id}">
+            <button type="button" class="btn-primary btn-topic-action generate-single-clip-btn" data-topic-id="${t.id}">
               <i class="fa-solid fa-scissors"></i> Clip
             </button>
           </div>
@@ -940,6 +959,96 @@ document.addEventListener('DOMContentLoaded', () => {
 
     updateSelectionCounter();
     bindTopicCardEvents();
+  }
+
+  let activeInlineVideoPlayer = null;
+  let activeInlineTimeHandler = null;
+  let activeInlineBtn = null;
+
+  function toggleInlineTopicPreview(topicId, start, end, title, btn) {
+    if (!state.videoId && !state.selectedFile) {
+      showToast("Please upload or import a video first.", "error");
+      return;
+    }
+
+    const playerBox = document.getElementById(`inline_player_${topicId}`);
+    const videoElem = document.getElementById(`inline_video_${topicId}`);
+    if (!playerBox || !videoElem) return;
+
+    // If this player is already open, close it
+    if (!playerBox.classList.contains('hidden') && activeInlineVideoPlayer === videoElem) {
+      closeActiveInlinePreview();
+      return;
+    }
+
+    // Close any other active inline video
+    closeActiveInlinePreview();
+
+    const fullVideoUrl = state.selectedFile
+      ? URL.createObjectURL(state.selectedFile)
+      : getAuthenticatedMediaUrl(`${state.apiBase}/api/videos/${state.videoId}/stream`);
+
+    playerBox.classList.remove('hidden');
+    activeInlineVideoPlayer = videoElem;
+    activeInlineBtn = btn;
+    if (btn) {
+      btn.innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
+    }
+
+    const seekAndPlay = () => {
+      try {
+        videoElem.currentTime = Math.max(0, start);
+      } catch (err) {
+        console.warn("Could not set currentTime immediately:", err);
+      }
+      const playPromise = videoElem.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          videoElem.muted = true;
+          videoElem.play().catch(() => {});
+        });
+      }
+
+      if (end && end > start) {
+        activeInlineTimeHandler = () => {
+          if (videoElem.currentTime >= end) {
+            videoElem.currentTime = start;
+            videoElem.pause();
+            if (activeInlineBtn) {
+              activeInlineBtn.innerHTML = '<i class="fa-solid fa-rotate-left"></i> Replay';
+            }
+          }
+        };
+        videoElem.addEventListener('timeupdate', activeInlineTimeHandler);
+      }
+    };
+
+    if (videoElem.src && (videoElem.src === fullVideoUrl || videoElem.src.includes(`${state.videoId}/stream`))) {
+      seekAndPlay();
+    } else {
+      videoElem.src = fullVideoUrl;
+      videoElem.addEventListener('loadedmetadata', seekAndPlay, { once: true });
+      videoElem.load();
+    }
+  }
+
+  function closeActiveInlinePreview() {
+    if (activeInlineVideoPlayer) {
+      try {
+        activeInlineVideoPlayer.pause();
+        if (activeInlineTimeHandler) {
+          activeInlineVideoPlayer.removeEventListener('timeupdate', activeInlineTimeHandler);
+          activeInlineTimeHandler = null;
+        }
+      } catch {}
+      const parentBox = activeInlineVideoPlayer.closest('.topic-inline-player-box');
+      if (parentBox) parentBox.classList.add('hidden');
+      activeInlineVideoPlayer = null;
+    }
+    if (activeInlineBtn) {
+      activeInlineBtn.innerHTML = '<i class="fa-solid fa-play"></i> Preview';
+      activeInlineBtn = null;
+    }
   }
 
   function bindTopicCardEvents() {
@@ -959,13 +1068,23 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
 
-    // Preview button
+    // Inline Preview button
     document.querySelectorAll('.preview-topic-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const tid = btn.getAttribute('data-topic-id');
         const start = parseFloat(btn.getAttribute('data-start') || '0');
         const end = parseFloat(btn.getAttribute('data-end') || '0');
         const title = btn.getAttribute('data-title') || '';
-        previewAtTimestamp(start, end, title);
+        toggleInlineTopicPreview(tid, start, end, title, btn);
+      });
+    });
+
+    // Close Inline Preview buttons
+    document.querySelectorAll('.btn-close-inline').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeActiveInlinePreview();
       });
     });
 
@@ -1409,16 +1528,18 @@ document.addEventListener('DOMContentLoaded', () => {
       if (state.topics && state.topics.length > 0) {
         ids = state.topics.map(t => t.id);
       } else if (state.clips && state.clips.length > 0) {
-        ids = state.clips.map(c => c.topic_id);
+        ids = state.clips.map(c => c.topic_id || c.id);
       }
     }
 
     if (!state.videoId) {
+      showToast("Please upload and index a video first.", "warning");
       alert("Please upload and index a video first.");
       return;
     }
 
     if (ids.length === 0) {
+      showToast("No topics or clips selected to merge.", "warning");
       alert("No topics found to merge.");
       return;
     }
@@ -1438,6 +1559,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = await res.json();
       state.mergedVideoUrl = getAuthenticatedMediaUrl(`${state.apiBase}${data.video_url}?t=${Date.now()}`);
+      state.mergedDuration = data.total_duration || 0;
 
       // Refresh clips list in background
       try {
@@ -1454,27 +1576,33 @@ document.addEventListener('DOMContentLoaded', () => {
       // Update player with merged video and play immediately!
       finalVideoPlayer.src = state.mergedVideoUrl;
       finalVideoPlayer.load();
-      finalVideoPlayer.play().catch(() => {});
+      finalVideoPlayer.play().catch(e => console.log("Playback deferred:", e));
 
       downloadVideoBtn.href = state.mergedVideoUrl;
-      downloadVideoBtnText.textContent = "Download Merged Master (.mp4)";
+      if (downloadVideoBtnText) {
+        downloadVideoBtnText.textContent = "Download Merged Master (.mp4)";
+      }
       downloadVideoBtn.setAttribute('download', `${state.videoId}_merged_master.mp4`);
 
       // Update metrics with merged duration & compression %
       const totalMergedDur = data.total_duration || state.clips.reduce((acc, c) => acc + (c.duration || 0), 0);
       updateStudioMetrics(state.duration, totalMergedDur);
 
-      nowPlayingLabel.textContent = "Active: Merged Master Video";
+      if (nowPlayingLabel) {
+        nowPlayingLabel.textContent = "Active: Merged Master Video";
+      }
       tabMergedVideo.classList.add('active');
       tabIndividualClips.classList.remove('active');
 
       setProcessing(false);
       outputSection.classList.remove('hidden');
       outputSection.scrollIntoView({ behavior: 'smooth' });
+      showToast("Selected clips successfully merged into unified master video!", "success");
 
     } catch (e) {
-      alert(`Merge Error: ${e.message}`);
       setProcessing(false);
+      showToast(`Merge Error: ${e.message}`, "error");
+      alert(`Merge Error: ${e.message}`);
     }
   }
 
@@ -1490,12 +1618,13 @@ document.addEventListener('DOMContentLoaded', () => {
       finalVideoPlayer.src = state.mergedVideoUrl;
       finalVideoPlayer.load();
       finalVideoPlayer.play().catch(() => {});
-      nowPlayingLabel.textContent = "Active: Merged Master Video";
+      if (nowPlayingLabel) nowPlayingLabel.textContent = "Active: Merged Master Video";
       downloadVideoBtn.href = state.mergedVideoUrl;
-      downloadVideoBtnText.textContent = "Download Merged Master (.mp4)";
+      if (downloadVideoBtnText) downloadVideoBtnText.textContent = "Download Merged Master (.mp4)";
       downloadVideoBtn.setAttribute('download', `${state.videoId}_merged_master.mp4`);
       const totalClipsDur = state.clips.reduce((acc, c) => acc + (c.duration || 0), 0);
-      updateStudioMetrics(state.duration, totalMergedDur || totalClipsDur);
+      const mergedDur = state.mergedDuration || totalClipsDur;
+      updateStudioMetrics(state.duration, mergedDur);
     } else {
       mergeSelectedClips();
     }
@@ -1645,17 +1774,11 @@ document.addEventListener('DOMContentLoaded', () => {
   function saveSession(token, user, remember = true) {
     state.token = token;
     state.user = user;
-    if (remember) {
-      localStorage.setItem('vidara_token', token);
-      localStorage.setItem('vidara_user', JSON.stringify(user));
-      sessionStorage.removeItem('vidara_token');
-      sessionStorage.removeItem('vidara_user');
-    } else {
-      sessionStorage.setItem('vidara_token', token);
-      sessionStorage.setItem('vidara_user', JSON.stringify(user));
-      localStorage.removeItem('vidara_token');
-      localStorage.removeItem('vidara_user');
-    }
+    // Always persist to localStorage for permanent sessions (no session expiration timing)
+    localStorage.setItem('vidara_token', token);
+    localStorage.setItem('vidara_user', JSON.stringify(user));
+    sessionStorage.removeItem('vidara_token');
+    sessionStorage.removeItem('vidara_user');
     updateUserUI();
   }
 
@@ -1677,23 +1800,7 @@ document.addEventListener('DOMContentLoaded', () => {
       headers['Authorization'] = `Bearer ${state.token}`;
     }
     const opts = Object.assign({}, options, { headers });
-    const response = await fetch(fullUrl, opts);
-
-    if (response.status === 401 && state.token) {
-      clearSession();
-      showToast("Session expired. Please sign in again.", "info");
-      if (authModal) authModal.classList.remove('hidden');
-      if (typeof window.switchAuthView === 'function') {
-        window.switchAuthView('login');
-        const loginAlert = document.getElementById('loginAlert');
-        if (loginAlert) {
-          loginAlert.textContent = "Your session has expired. Please sign in again.";
-          loginAlert.className = "auth-alert error";
-          loginAlert.classList.remove('hidden');
-        }
-      }
-    }
-    return response;
+    return await fetch(fullUrl, opts);
   }
 
   function updateUserUI() {
@@ -1721,36 +1828,21 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function checkAuthState() {
+    // Permanent session: retain existing session, do not interrupt with session timeouts or popups
     if (!state.token) {
       updateUserUI();
-      // Initially display the authentication modal when entering the site without an active session
-      setTimeout(() => {
-        if (!state.token && authModal) {
-          authModal.classList.remove('hidden');
-          if (typeof window.switchAuthView === 'function') {
-            window.switchAuthView('login');
-          }
-        }
-      }, 100);
       return;
     }
     try {
       const res = await apiFetch('/api/auth/me');
       if (res.ok) {
         const data = await res.json();
-        state.user = data.user;
-        const storage = localStorage.getItem('vidara_token') ? localStorage : sessionStorage;
-        storage.setItem('vidara_user', JSON.stringify(state.user));
-        updateUserUI();
-      } else {
-        clearSession();
-        if (authModal) {
-          authModal.classList.remove('hidden');
-          if (typeof window.switchAuthView === 'function') {
-            window.switchAuthView('login');
-          }
+        if (data && data.user) {
+          state.user = data.user;
+          localStorage.setItem('vidara_user', JSON.stringify(state.user));
         }
       }
+      updateUserUI();
     } catch (e) {
       console.warn("Could not check auth state:", e);
       updateUserUI();
@@ -1910,6 +2002,22 @@ document.addEventListener('DOMContentLoaded', () => {
     setupPasswordToggle(resetNewPassword, toggleResetNewPassword);
     setupPasswordToggle(resetConfirmPassword, toggleResetConfirmPassword);
 
+    function clearAuthInputs() {
+      if (loginEmail) loginEmail.value = '';
+      if (loginPassword) loginPassword.value = '';
+      if (signupUsername) signupUsername.value = '';
+      if (signupEmail) signupEmail.value = '';
+      if (signupPassword) signupPassword.value = '';
+      if (signupConfirmPassword) signupConfirmPassword.value = '';
+      if (forgotEmail) forgotEmail.value = '';
+      if (resetNewPassword) resetNewPassword.value = '';
+      if (resetConfirmPassword) resetConfirmPassword.value = '';
+      try {
+        if (loginForm) loginForm.reset();
+        if (signupForm) signupForm.reset();
+      } catch (_) {}
+    }
+
     // View switcher
     function switchAuthView(viewName, data = {}) {
       const views = [viewAuthLogin, viewAuthSignup, viewAuthForgot, viewAuthReset, viewAuthVerifyPending, viewAuthCallback];
@@ -1922,6 +2030,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       switch (viewName) {
         case 'signup':
+          clearAuthInputs();
           if (viewAuthSignup) viewAuthSignup.classList.remove('hidden');
           if (authModalTitle) authModalTitle.textContent = 'Create Account';
           if (authModalSubtitle) authModalSubtitle.textContent = 'Start analyzing long-form videos with autonomous topic discovery.';
@@ -1932,7 +2041,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (authModalTitle) authModalTitle.textContent = 'Reset Password';
           if (authModalSubtitle) authModalSubtitle.textContent = "We'll send you a secure link to reset your account password.";
           if (forgotEmail) {
-            if (data.email) forgotEmail.value = data.email;
+            forgotEmail.value = (data && data.email) ? data.email : '';
             forgotEmail.focus();
           }
           break;
@@ -1959,13 +2068,25 @@ document.addEventListener('DOMContentLoaded', () => {
           break;
         case 'login':
         default:
+          clearAuthInputs();
           if (viewAuthLogin) viewAuthLogin.classList.remove('hidden');
           if (authModalTitle) authModalTitle.textContent = 'Welcome to Vidara';
           if (authModalSubtitle) authModalSubtitle.textContent = 'Sign in to save your clips and access your personal video library.';
           if (loginEmail) {
-            if (data.email) loginEmail.value = data.email;
+            loginEmail.value = (data && data.email) ? data.email : '';
             loginEmail.focus();
           }
+          if (loginPassword) {
+            loginPassword.value = '';
+          }
+          // Aggressively purge browser-saved autofill from input fields
+          const purgeAutofilledCreds = () => {
+            if (loginEmail && (!data || !data.email)) loginEmail.value = '';
+            if (loginPassword) loginPassword.value = '';
+          };
+          setTimeout(purgeAutofilledCreds, 30);
+          setTimeout(purgeAutofilledCreds, 100);
+          setTimeout(purgeAutofilledCreds, 300);
           break;
       }
     }
@@ -1975,6 +2096,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (authBtn) {
       authBtn.addEventListener('click', () => {
         if (authModal) {
+          clearAuthInputs();
           authModal.classList.remove('hidden');
           switchAuthView('login');
         }
@@ -1983,6 +2105,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (closeAuthModalBtn) {
       closeAuthModalBtn.addEventListener('click', () => {
+        clearAuthInputs();
         if (authModal) authModal.classList.add('hidden');
       });
     }

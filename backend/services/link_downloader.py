@@ -52,18 +52,20 @@ class LinkDownloader:
 
         # Try yt-dlp first for maximum platform compatibility and format selection
         if not is_direct_stream:
+            from backend.config import get_ffmpeg_executable
+            ffmpeg_path = get_ffmpeg_executable()
+
             ydl_opts = {
-                # High-speed format priority: Pre-muxed 720p H.264 (YouTube format 22) downloads 5-10x faster
-                # with instant HTML5 playback and zero ffmpeg muxing/transcoding overhead
-                'format': '22/bestvideo[height<=720][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best',
+                'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
                 'outtmpl': output_template,
                 'merge_output_format': 'mp4',
                 'noplaylist': True,
                 'quiet': True,
                 'no_warnings': True,
-                'socket_timeout': 30,
-                'retries': 3,
+                'socket_timeout': 45,
+                'retries': 5,
                 'prefer_ffmpeg': True,
+                'ffmpeg_location': ffmpeg_path,
             }
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -71,7 +73,6 @@ class LinkDownloader:
                     if info:
                         raw_title = info.get('title')
                         if raw_title:
-                            # Sanitize title
                             title = re.sub(r'[^\w\s\-\.]', '', raw_title)[:100].strip() or "Online Video"
                         duration = float(info.get('duration') or 0.0)
 
@@ -83,10 +84,29 @@ class LinkDownloader:
                             if valid_matches:
                                 downloaded_path = valid_matches[0]
             except Exception as ydl_err:
-                print(f"Vidara yt-dlp note: {ydl_err}. Falling back to direct streaming download...")
+                print(f"Vidara yt-dlp primary format note: {ydl_err}. Retrying with fallback format 'best'...")
+                try:
+                    ydl_opts_fallback = dict(ydl_opts)
+                    ydl_opts_fallback['format'] = 'best'
+                    with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+                        info = ydl.extract_info(clean_url, download=True)
+                        if info:
+                            raw_title = info.get('title')
+                            if raw_title:
+                                title = re.sub(r'[^\w\s\-\.]', '', raw_title)[:100].strip() or "Online Video"
+                            duration = float(info.get('duration') or 0.0)
+                            if target_mp4_path.exists():
+                                downloaded_path = target_mp4_path
+                            else:
+                                matches = list(UPLOAD_DIR.glob(f"{video_id}.*"))
+                                valid_matches = [m for m in matches if m.suffix.lower() in [".mp4", ".webm", ".mkv", ".mov", ".m4v"]]
+                                if valid_matches:
+                                    downloaded_path = valid_matches[0]
+                except Exception as fallback_err:
+                    print(f"Vidara yt-dlp fallback error: {fallback_err}")
 
-        # If yt-dlp did not produce a file, or if it's a direct video link, use streaming download
-        if not downloaded_path or not downloaded_path.exists():
+        # If it's a direct video link (.mp4, .webm, etc.) and yt-dlp did not produce a file, use streaming download
+        if (not downloaded_path or not downloaded_path.exists()) and is_direct_stream:
             downloaded_path = cls._stream_download_direct(clean_url, target_mp4_path)
             url_name = Path(urllib.parse.urlparse(clean_url).path).stem
             if url_name and len(url_name) > 2:

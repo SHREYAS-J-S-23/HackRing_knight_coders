@@ -1,10 +1,12 @@
 import uuid
 import shutil
 import time
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
-from fastapi.responses import FileResponse, RedirectResponse
+import re
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.services.auth_service import get_current_user, get_optional_current_user
@@ -293,7 +295,7 @@ async def ingest_video_url(
 
     try:
         user_id = current_user["id"]
-        res = LinkDownloader.download_video_from_url(req.url.strip(), user_id=user_id)
+        res = await asyncio.to_thread(LinkDownloader.download_video_from_url, req.url.strip(), user_id=user_id)
         video_id = res["video_id"]
         filename = res["filename"]
         duration = res["duration_seconds"]
@@ -769,6 +771,45 @@ async def query_video(
     }
 
 
+def resolve_input_video_path(video_id: str, session: Dict[str, Any]) -> Optional[Path]:
+    """Robustly resolves the physical input video path from session, DB, disk, or Supabase."""
+    vp = session.get("video_path")
+    if vp and Path(vp).is_file():
+        return Path(vp)
+
+    vid_record = DatabaseService.get_video(video_id)
+    if vid_record and vid_record.get("filepath") and Path(vid_record["filepath"]).is_file():
+        session["video_path"] = vid_record["filepath"]
+        return Path(vid_record["filepath"])
+
+    for ext in [".mp4", ".mov", ".mkv", ".webm", ".avi"]:
+        cand = UPLOAD_DIR / f"{video_id}{ext}"
+        if cand.is_file():
+            session["video_path"] = str(cand)
+            return cand
+
+    matches = list(UPLOAD_DIR.glob(f"{video_id}.*"))
+    if matches and matches[0].is_file():
+        session["video_path"] = str(matches[0])
+        return matches[0]
+
+    if is_supabase_configured():
+        try:
+            from backend.services.supabase_service import SupabaseStorageService, to_uuid
+            v_uuid = to_uuid(video_id)
+            fn = session.get("filename") or (vid_record.get("filename") if vid_record else "video.mp4")
+            supa_path = f"{v_uuid}/source/{fn}"
+            dest = UPLOAD_DIR / f"{video_id}.mp4"
+            down = SupabaseStorageService.download_file(SUPABASE_STORAGE_BUCKET_VIDEOS, supa_path, dest)
+            if down and down.is_file():
+                session["video_path"] = str(down)
+                return down
+        except Exception as e:
+            print(f"Warning: Failed to fetch source video from Supabase: {e}")
+
+    return None
+
+
 @router.post("/videos/{video_id}/generate-clips")
 async def generate_clips(
     video_id: str,
@@ -776,17 +817,15 @@ async def generate_clips(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
-    Step 7 & 8: Generates individual video clips for selected topics with padding and faststart.
+    Step 8: Deterministically cuts verified video clips for specified topics.
+    Preserves +80ms lead-in, +160ms tail-out, PTS normalization, and faststart.
     """
     verify_video_access(video_id, current_user["id"])
     session = get_session_data(video_id, user_id=current_user["id"])
-    all_topics = session.get("topics") or []
-    if not all_topics:
-        raise HTTPException(status_code=400, detail="No topics have been discovered yet.")
+    all_topics = session.get("topics") or [DiscoveredTopic(**t) for t in DatabaseService.get_topics(video_id)]
 
-    # Filter to selected topic IDs (handling prefix differences safely)
     if req.topic_ids:
-        def norm_id(i: Any) -> str:
+        def norm_id(i):
             return str(i).replace(f"{video_id}_", "")
 
         req_set = {norm_id(i) for i in req.topic_ids}
@@ -803,7 +842,10 @@ async def generate_clips(
     if not selected_topics:
         selected_topics = all_topics[:3]
 
-    video_path = Path(session["video_path"])
+    video_path = resolve_input_video_path(video_id, session)
+    if not video_path or not video_path.is_file():
+        raise HTTPException(status_code=404, detail="Original video file not found for cutting clips.")
+
     transcript = session.get("transcript")
     segments_data = None
     if transcript and hasattr(transcript, "segments"):
@@ -833,28 +875,64 @@ async def generate_clips(
 @router.get("/videos/{video_id}/stream")
 async def stream_full_video(
     video_id: str,
+    request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Stream full original video with HTTP 206 Partial Content Range support for scene preview."""
     verify_video_access(video_id, current_user["id"])
     session = get_session_data(video_id, user_id=current_user["id"])
-    video_path = Path(session["video_path"]) if session.get("video_path") else None
-    if not video_path or not video_path.exists():
-        video_path = UPLOAD_DIR / f"{video_id}.mp4"
-    if not video_path.exists():
-        matches = list(UPLOAD_DIR.glob(f"{video_id}.*"))
-        if matches:
-            video_path = matches[0]
+    video_path = resolve_input_video_path(video_id, session)
 
     if not video_path or not video_path.exists():
         raise HTTPException(status_code=404, detail="Original video file not found.")
 
-    return FileResponse(
-        path=str(video_path),
-        filename=video_path.name,
-        media_type="video/mp4",
-        headers={"Content-Disposition": f'inline; filename="{video_path.name}"'}
-    )
+    file_size = video_path.stat().st_size
+    range_header = request.headers.get("Range")
+
+    if not range_header:
+        return FileResponse(
+            path=str(video_path),
+            filename=video_path.name,
+            media_type="video/mp4",
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+                "Content-Disposition": f'inline; filename="{video_path.name}"'
+            }
+        )
+
+    range_match = re.match(r"bytes=(\d+)-(\d*)", range_header)
+    if not range_match:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+    start = int(range_match.group(1))
+    end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+    if start >= file_size or end >= file_size or start > end:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+    content_length = end - start + 1
+
+    def file_iterator():
+        with open(video_path, "rb") as f:
+            f.seek(start)
+            remaining = content_length
+            chunk_size = 1024 * 1024
+            while remaining > 0:
+                to_read = min(chunk_size, remaining)
+                data = f.read(to_read)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    headers = {
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(content_length),
+        "Content-Type": "video/mp4",
+        "Content-Disposition": f'inline; filename="{video_path.name}"'
+    }
+    return StreamingResponse(file_iterator(), status_code=206, headers=headers)
 
 
 @router.post("/videos/{video_id}/merge")
@@ -869,50 +947,135 @@ async def merge_clips(
     """
     verify_video_access(video_id, current_user["id"])
     session = get_session_data(video_id, user_id=current_user["id"])
-    all_clips = session.get("clips") or DatabaseService.get_clips(video_id)
+    all_clips = session.get("clips") or DatabaseService.get_clips(video_id) or []
     all_topics = session.get("topics") or [DiscoveredTopic(**t) for t in DatabaseService.get_topics(video_id)]
 
-    # Determine which topics are requested
-    selected_topic_ids = set(req.topic_ids or [])
-    if not selected_topic_ids and req.clip_ids:
-        selected_topic_ids = {c.replace(f"{video_id}_", "").replace(".mp4", "") for c in req.clip_ids}
+    # 1. Determine requested topic keys with bidirectional normalization
+    raw_requested_ids = list(req.topic_ids or [])
+    if not raw_requested_ids and req.clip_ids:
+        raw_requested_ids = list(req.clip_ids)
+
+    selected_topic_keys = set()
+    for item in raw_requested_ids:
+        s = str(item).strip()
+        selected_topic_keys.add(s)
+        clean = s.replace(f"{video_id}_", "").replace(".mp4", "")
+        selected_topic_keys.add(clean)
+        selected_topic_keys.add(f"{video_id}_{clean}")
 
     # If no specific topics provided, default to all discovered topics
-    if not selected_topic_ids:
-        selected_topic_ids = {t.id if hasattr(t, "id") else t["id"] for t in all_topics}
+    if not selected_topic_keys:
+        for t in all_topics:
+            tid = str(t.id if hasattr(t, "id") else t["id"])
+            selected_topic_keys.add(tid)
+            clean = tid.replace(f"{video_id}_", "").replace(".mp4", "")
+            selected_topic_keys.add(clean)
+            selected_topic_keys.add(f"{video_id}_{clean}")
 
-    # Check which clips already exist on disk
-    existing_clip_map = {c.get("topic_id"): c for c in all_clips if Path(c.get("filepath", "")).exists()}
-    missing_topics = [
-        t for t in all_topics 
-        if (t.id if hasattr(t, "id") else t["id"]) in selected_topic_ids 
-        and (t.id if hasattr(t, "id") else t["id"]) not in existing_clip_map
-    ]
+    # 2. Build comprehensive lookup of already-rendered clips on disk
+    existing_clip_map: Dict[str, Dict[str, Any]] = {}
+    resolved_clips_list = []
 
-    # If any clips are missing from disk, render them on the fly!
+    for c in all_clips:
+        c_dict = dict(c) if isinstance(c, dict) else (c.model_dump() if hasattr(c, "model_dump") else dict(c))
+        fp = Path(c_dict.get("filepath", ""))
+        cid = str(c_dict.get("id", ""))
+        ctid = str(c_dict.get("topic_id", ""))
+        clean_tid = ctid.replace(f"{video_id}_", "").replace(".mp4", "") or cid.replace(f"{video_id}_", "").replace(".mp4", "")
+
+        if not fp.is_file():
+            candidates = [
+                OUTPUT_DIR / (c_dict.get("filename") or f"{cid}.mp4"),
+                OUTPUT_DIR / f"{video_id}_{clean_tid}.mp4",
+                OUTPUT_DIR / f"{clean_tid}.mp4"
+            ]
+            found = next((p for p in candidates if p.is_file()), None)
+            if not found:
+                glob_matches = list(OUTPUT_DIR.glob(f"*{clean_tid}*.mp4"))
+                if glob_matches and glob_matches[0].is_file():
+                    found = glob_matches[0]
+            if found:
+                c_dict["filepath"] = str(found)
+                fp = found
+
+        if fp.is_file():
+            for k in [cid, clean_tid, f"{video_id}_{clean_tid}", ctid]:
+                if k:
+                    existing_clip_map[k] = c_dict
+            resolved_clips_list.append(c_dict)
+
+    # 3. Check which requested topics are missing and need on-the-fly rendering
+    missing_topics = []
+    for t in all_topics:
+        tid = str(t.id if hasattr(t, "id") else t["id"])
+        clean_tid = tid.replace(f"{video_id}_", "").replace(".mp4", "")
+        if (tid in selected_topic_keys or clean_tid in selected_topic_keys):
+            if tid not in existing_clip_map and clean_tid not in existing_clip_map and f"{video_id}_{clean_tid}" not in existing_clip_map:
+                missing_topics.append(t)
+
+    # 4. If any clips are missing from disk, attempt to render them on the fly!
     if missing_topics:
-        video_path = Path(session["video_path"])
-        newly_rendered = VideoCutter.render_topic_clips(
-            input_video_path=video_path,
-            video_id=video_id,
-            topics=[t.model_dump() if hasattr(t, "model_dump") else t for t in missing_topics]
-        )
-        for c in newly_rendered:
-            existing_clip_map[c["topic_id"]] = c
-        all_clips = list(existing_clip_map.values())
-        DatabaseService.save_clips(video_id, all_clips)
-        session["clips"] = all_clips
+        video_path = resolve_input_video_path(video_id, session)
+        if video_path and video_path.is_file():
+            newly_rendered = VideoCutter.render_topic_clips(
+                input_video_path=video_path,
+                video_id=video_id,
+                topics=[t.model_dump() if hasattr(t, "model_dump") else t for t in missing_topics]
+            )
+            for c in newly_rendered:
+                cid = str(c.get("id", ""))
+                ctid = str(c.get("topic_id", ""))
+                clean_tid = ctid.replace(f"{video_id}_", "").replace(".mp4", "")
+                for k in [cid, clean_tid, f"{video_id}_{clean_tid}", ctid]:
+                    if k:
+                        existing_clip_map[k] = c
+                resolved_clips_list.append(c)
 
-    # Collect and sort clips chronologically for concatenation
-    target_clips = [c for c in all_clips if c.get("topic_id") in selected_topic_ids or c.get("id") in selected_topic_ids]
+            all_clips = list({c["id"]: c for c in resolved_clips_list}.values())
+            DatabaseService.save_clips(video_id, all_clips)
+            session["clips"] = all_clips
+        else:
+            print(f"Notice: Source video file not found to cut {len(missing_topics)} missing topic clips; proceeding with available clips.")
+
+    # 5. Collect target clips based on selected_topic_keys
+    target_clips = []
+    seen_target_ids = set()
+    for c in resolved_clips_list:
+        cid = str(c.get("id", ""))
+        ctid = str(c.get("topic_id", ""))
+        clean_cid = cid.replace(f"{video_id}_", "").replace(".mp4", "")
+        clean_ctid = ctid.replace(f"{video_id}_", "").replace(".mp4", "")
+        if (
+            cid in selected_topic_keys or
+            ctid in selected_topic_keys or
+            clean_cid in selected_topic_keys or
+            clean_ctid in selected_topic_keys
+        ):
+            if cid not in seen_target_ids:
+                seen_target_ids.add(cid)
+                target_clips.append(c)
+
     if not target_clips:
-        target_clips = all_clips
+        target_clips = list({c["id"]: c for c in resolved_clips_list}.values())
 
-    target_clips.sort(key=lambda c: c.get("start_time", 0.0))
-    clip_paths = [Path(c["filepath"]) for c in target_clips if Path(c.get("filepath", "")).exists()]
+    target_clips.sort(key=lambda c: float(c.get("start_time", 0.0)))
+    clip_paths = []
+    for c in target_clips:
+        p = Path(c.get("filepath", ""))
+        if p.is_file() and p.stat().st_size > 1000:
+            clip_paths.append(p)
+        else:
+            alt = OUTPUT_DIR / (c.get("filename") or f"{c.get('id', '')}.mp4")
+            if alt.is_file() and alt.stat().st_size > 1000:
+                clip_paths.append(alt)
+
     if not clip_paths:
-        raise HTTPException(status_code=400, detail="Could not find or render clips on disk.")
+        raise HTTPException(
+            status_code=400,
+            detail="Could not find or render clips on disk. Please generate clips first or ensure the video is indexed."
+        )
 
+    # 6. Execute deterministic FFmpeg merge
     merged_filename = f"{video_id}_selected_master.mp4"
     output_path = OUTPUT_DIR / merged_filename
 
@@ -929,7 +1092,7 @@ async def merge_clips(
         except Exception as supa_err:
             print(f"Warning: Supabase upload on merge_clips failed: {supa_err}")
 
-    total_merged_dur = sum(c.get("duration", 0.0) for c in target_clips)
+    total_merged_dur = sum(float(c.get("duration", 0.0)) for c in target_clips)
 
     return {
         "status": "success",

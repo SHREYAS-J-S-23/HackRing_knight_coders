@@ -6,10 +6,10 @@
   <title>Vidara — AI Video Intelligence Platform</title>
   <meta name="description" content="Understand Every Moment. AI-powered long-form video intelligence with autonomous topic discovery, voice/text semantic retrieval, and verified deterministic clip assembly.">
   
-  <!-- Fonts -->
+  <!-- Fonts: Stencil Display & Technical Mono -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Syne:wght@700;800&display=swap" rel="stylesheet">
   
   <!-- Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -23,7 +23,12 @@
   <div class="glow-bg glow-1"></div>
   <div class="glow-bg glow-2"></div>
 
-  <!-- Navigation Bar -->
+  <!-- Ambient Interactive Morse Code Canvas -->
+  <div class="ambient-fx-layer" id="ambientFxLayer" aria-hidden="true">
+    <canvas id="morseCanvas" class="morse-canvas"></canvas>
+  </div>
+
+  <!-- Navigation Bar (Floating Clean Transparent Glass) -->
   <header class="navbar">
     <div class="nav-container">
       <div class="brand">
@@ -38,18 +43,9 @@
       </div>
 
       <div class="nav-actions">
-        <div class="engine-pill" id="engineStatusPill">
-          <span class="pulse-dot"></span>
-          <span class="engine-name">Groq LPU (GPT-OSS 120B Flagship + Whisper Lg-v3)</span>
-        </div>
-
         <!-- Personal Library Button -->
         <button id="navLibraryBtn" class="btn-ghost nav-library-btn" title="View Saved Clips & Projects">
           <i class="fa-solid fa-bookmark icon-accent"></i> My Library <span class="badge badge-accent badge-sm" id="navLibraryCountBadge">0</span>
-        </button>
-
-        <button id="configKeyBtn" class="btn-ghost" title="Configure API Credentials">
-          <i class="fa-solid fa-key"></i> Keys
         </button>
 
         <!-- User Authentication & Profile -->
@@ -80,34 +76,50 @@
     <!-- PIPELINE PROGRESS INDICATOR -->
     <section class="pipeline-stepper" id="pipelineStepper" aria-label="Processing Steps">
       <div class="step-card active" id="stepIndicator1">
-        <div class="step-number">1</div>
+        <div class="step-badge">
+          <span class="step-num">01</span>
+          <span class="step-pulse"></span>
+        </div>
         <div class="step-info">
-          <h4>Video Ingestion</h4>
-          <p>Extract & Whisper STT</p>
+          <div class="step-stage-tag">STAGE 01 // AUDIO INGEST</div>
+          <h4>Whisper STT Extraction</h4>
+          <p>16kHz audio stream & timestamped word-level transcript</p>
         </div>
       </div>
-      <div class="step-divider"></div>
+      <div class="step-divider"><i class="fa-solid fa-angle-right"></i></div>
       <div class="step-card" id="stepIndicator2">
-        <div class="step-number">2</div>
+        <div class="step-badge">
+          <span class="step-num">02</span>
+          <span class="step-pulse"></span>
+        </div>
         <div class="step-info">
-          <h4>Semantic Index</h4>
-          <p>Topic Graph & Embeddings</p>
+          <div class="step-stage-tag">STAGE 02 // SEMANTIC GRAPH</div>
+          <h4>Topic Graph Indexing</h4>
+          <p>Hierarchical concept clustering & vector representations</p>
         </div>
       </div>
-      <div class="step-divider"></div>
+      <div class="step-divider"><i class="fa-solid fa-angle-right"></i></div>
       <div class="step-card" id="stepIndicator3">
-        <div class="step-number">3</div>
+        <div class="step-badge">
+          <span class="step-num">03</span>
+          <span class="step-pulse"></span>
+        </div>
         <div class="step-info">
-          <h4>Intelligence Inference</h4>
-          <p>Ask or Discover Topics</p>
+          <div class="step-stage-tag">STAGE 03 // INFERENCE ENGINE</div>
+          <h4>Intent & Topic Reasoning</h4>
+          <p>Autonomous discovery & conversational voice/text retrieval</p>
         </div>
       </div>
-      <div class="step-divider"></div>
+      <div class="step-divider"><i class="fa-solid fa-angle-right"></i></div>
       <div class="step-card" id="stepIndicator4">
-        <div class="step-number">4</div>
+        <div class="step-badge">
+          <span class="step-num">04</span>
+          <span class="step-pulse"></span>
+        </div>
         <div class="step-info">
-          <h4>Deterministic Clips</h4>
-          <p>Verified Cuts & Merge</p>
+          <div class="step-stage-tag">STAGE 04 // CLIP ASSEMBLY</div>
+          <h4>Deterministic Video Cuts</h4>
+          <p>Lossless frame-accurate FFmpeg cuts & highlight stitching</p>
         </div>
       </div>
     </section>
@@ -142,14 +154,10 @@
                 <i class="fa-solid fa-video"></i>
               </div>
               <h3>Drop your long-form video here, or <span class="highlight-link">browse</span></h3>
-              <p>Chunked upload & streaming ingestion • Zero RAM overload • MP4, MOV, WebM</p>
               
               <div class="dropzone-footer">
                 <button type="button" id="browseFileBtn" class="btn-primary">
                   <i class="fa-solid fa-folder-open"></i> Select Video File
-                </button>
-                <button type="button" id="useSampleDemoBtn" class="btn-secondary">
-                  <i class="fa-solid fa-wand-magic-sparkles"></i> Use Founder Demo Video
                 </button>
               </div>
             </div>
@@ -191,7 +199,7 @@
           <div class="file-details">
             <i class="fa-solid fa-file-video file-icon"></i>
             <div class="file-meta">
-              <h4 id="videoFileName">demo_video.mp4</h4>
+              <h4 id="videoFileName">No file selected</h4>
               <span id="videoFileStats">00:00 • Ready for Vidara intelligence</span>
             </div>
           </div>
@@ -253,7 +261,7 @@
           <div class="ask-input-box">
             <div class="ask-input-wrapper">
               <i class="fa-solid fa-magnifying-glass search-icon"></i>
-              <input type="text" id="queryTextInput" name="search_query_prompt" class="form-input ask-input" placeholder="e.g. Find where the speaker explains assets vs liabilities, or key advice..." autocomplete="new-password" data-lpignore="true" data-form-type="other" spellcheck="false" autocorrect="off" autocapitalize="off" value="" />
+              <input type="text" id="queryTextInput" name="video_concept_search" class="form-input ask-input" placeholder="e.g. Find where the speaker explains assets vs liabilities, or key advice..." autocomplete="off" spellcheck="false" />
               <button type="button" id="voiceQueryBtn" class="btn-mic" title="Ask by Voice">
                 <i class="fa-solid fa-microphone"></i>
               </button>
@@ -271,12 +279,9 @@
               <button class="sample-prompt-tag" data-query="Extract all top moments">All Highlights</button>
             </div>
 
-            <div class="ask-action-row" style="display: flex; gap: 12px; margin-top: 6px;">
-              <button id="submitQueryBtn" class="btn-action" style="flex: 2;">
+            <div class="ask-action-row" style="margin-top: 6px;">
+              <button id="submitQueryBtn" class="btn-action" style="width: 100%;">
                 <i class="fa-solid fa-arrow-right"></i> Search Video Moments
-              </button>
-              <button id="autoExtractHighlightsBtn" class="btn-secondary" style="flex: 1;">
-                <i class="fa-solid fa-wand-magic-sparkles"></i> Auto-Highlights
               </button>
             </div>
           </div>
@@ -570,16 +575,16 @@
         <div class="auth-view" id="viewAuthLogin">
           <div class="auth-alert hidden" id="loginAlert"></div>
 
-          <form id="loginForm" novalidate>
+          <form id="loginForm" novalidate autocomplete="off">
             <div class="form-group">
               <label for="loginEmail"><i class="fa-solid fa-envelope"></i> Email Address</label>
-              <input type="email" id="loginEmail" placeholder="you@example.com" class="form-input" autocomplete="email" required />
+              <input type="email" id="loginEmail" placeholder="you@example.com" class="form-input" autocomplete="off" required value="" />
             </div>
 
             <div class="form-group">
               <label for="loginPassword"><i class="fa-solid fa-lock"></i> Password</label>
               <div class="password-input-wrap">
-                <input type="password" id="loginPassword" placeholder="••••••••" class="form-input" autocomplete="current-password" required />
+                <input type="password" id="loginPassword" placeholder="••••••••" class="form-input" autocomplete="new-password" required value="" />
                 <button type="button" class="btn-pwd-toggle" id="toggleLoginPassword" aria-label="Show password" tabindex="-1">
                   <i class="fa-regular fa-eye"></i>
                 </button>
@@ -608,22 +613,22 @@
         <div class="auth-view hidden" id="viewAuthSignup">
           <div class="auth-alert hidden" id="signupAlert"></div>
 
-          <form id="signupForm" novalidate>
+          <form id="signupForm" novalidate autocomplete="off">
             <div class="form-group">
               <label for="signupUsername"><i class="fa-solid fa-user"></i> Username</label>
-              <input type="text" id="signupUsername" placeholder="e.g. alex_creator" class="form-input" autocomplete="username" required />
+              <input type="text" id="signupUsername" placeholder="e.g. alex_creator" class="form-input" autocomplete="off" required value="" />
               <span class="input-hint">3–30 characters (letters, numbers, underscores)</span>
             </div>
 
             <div class="form-group">
               <label for="signupEmail"><i class="fa-solid fa-envelope"></i> Email Address</label>
-              <input type="email" id="signupEmail" placeholder="you@example.com" class="form-input" autocomplete="email" required />
+              <input type="email" id="signupEmail" placeholder="you@example.com" class="form-input" autocomplete="off" required value="" />
             </div>
 
             <div class="form-group">
               <label for="signupPassword"><i class="fa-solid fa-lock"></i> Password</label>
               <div class="password-input-wrap">
-                <input type="password" id="signupPassword" placeholder="At least 8 characters" class="form-input" autocomplete="new-password" required />
+                <input type="password" id="signupPassword" placeholder="At least 8 characters" class="form-input" autocomplete="new-password" required value="" />
                 <button type="button" class="btn-pwd-toggle" id="toggleSignupPassword" aria-label="Show password" tabindex="-1">
                   <i class="fa-regular fa-eye"></i>
                 </button>
@@ -808,5 +813,6 @@
   <div id="toastContainer" class="toast-container"></div>
 
   <script src="js/app.js"></script>
+  <script src="js/ambient_fx.js"></script>
 </body>
 </html>
