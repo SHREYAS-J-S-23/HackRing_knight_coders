@@ -61,78 +61,49 @@ class AuthService:
         clean_email = email.strip().lower()
 
         if is_supabase_configured():
-            auth_client = get_supabase_anon_client() or get_supabase_client()
             admin_client = get_supabase_client()
             try:
-                res = auth_client.auth.sign_up({
-                    "email": clean_email,
-                    "password": password,
-                    "options": {
-                        "data": {
-                            "username": clean_username,
-                            "display_name": clean_username
-                        }
-                    }
-                })
+                user = None
+                if admin_client:
+                    try:
+                        admin_res = admin_client.auth.admin.create_user({
+                            "email": clean_email,
+                            "password": password,
+                            "email_confirm": True,
+                            "user_metadata": {
+                                "username": clean_username,
+                                "display_name": clean_username
+                            }
+                        })
+                        user = admin_res.user
+                    except Exception as admin_err:
+                        err_str = str(admin_err)
+                        if "already" in err_str.lower() or "registered" in err_str.lower() or "unique constraint" in err_str.lower() or "exists" in err_str.lower():
+                            raise HTTPException(status_code=400, detail="An account with this email address already exists. Please log in.")
+                        raise HTTPException(status_code=400, detail=f"Signup failed: {err_str}")
 
-                user = res.user
                 if not user:
                     raise HTTPException(status_code=400, detail="Could not create user account.")
 
-                # Supabase Gotrue returns an empty identities list when the email is already registered
-                if getattr(user, "identities", None) is not None and len(user.identities) == 0:
-                    raise HTTPException(status_code=400, detail="An account with this email address already exists. Please log in.")
-
-                # Ensure profile exists in profiles table using admin client
+                # Ensure profile row exists in public.profiles
                 if admin_client:
                     try:
                         admin_client.table("profiles").upsert({
                             "id": user.id,
                             "display_name": clean_username,
-                            "username": clean_username,
-                            "email": clean_email,
                             "updated_at": "now()"
                         }).execute()
-                    except Exception:
-                        try:
-                            admin_client.table("profiles").upsert({
-                                "id": user.id,
-                                "display_name": clean_username,
-                                "updated_at": "now()"
-                            }).execute()
-                        except Exception as p_err:
-                            print(f"Profile upsert note on signup: {p_err}")
+                    except Exception as p_err:
+                        print(f"Profile upsert note on signup: {p_err}")
 
-                # Check if session token was returned (auto-confirmed) or email verification pending
-                if res.session and res.session.access_token:
-                    return {
-                        "status": "authenticated",
-                        "token": res.session.access_token,
-                        "refresh_token": res.session.refresh_token,
-                        "user": {
-                            "id": user.id,
-                            "email": user.email,
-                            "username": clean_username,
-                            "display_name": clean_username,
-                            "avatar_url": ""
-                        }
-                    }
-                else:
-                    return {
-                        "status": "verification_pending",
-                        "message": "Account created! Please check your email inbox to verify your account before logging in.",
-                        "user": {
-                            "id": user.id,
-                            "email": user.email,
-                            "username": clean_username
-                        }
-                    }
+                # Immediately sign in to obtain authenticated JWT tokens
+                return cls.login(clean_email, password)
 
             except HTTPException:
                 raise
             except Exception as e:
                 err_str = str(e)
-                if "already registered" in err_str.lower() or "unique constraint" in err_str.lower() or "user already exists" in err_str.lower():
+                if "already" in err_str.lower() or "registered" in err_str.lower() or "unique constraint" in err_str.lower() or "exists" in err_str.lower():
                     raise HTTPException(status_code=400, detail="An account with this email address already exists. Please log in.")
                 raise HTTPException(status_code=400, detail=f"Signup failed: {err_str}")
 
