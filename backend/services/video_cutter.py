@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from backend.config import get_ffmpeg_executable, OUTPUT_DIR
+from backend.config import get_ffmpeg_executable, OUTPUT_DIR, is_supabase_configured, SUPABASE_STORAGE_BUCKET_CLIPS, SUPABASE_STORAGE_BUCKET_SUBTITLES
 from backend.models.schemas import EditDecisionList, EditDecision
 
 class VideoCutter:
@@ -386,6 +386,24 @@ class VideoCutter:
                     except Exception as vtt_err:
                         print(f"Warning: VTT generation error for clip {clean_tid}: {vtt_err}")
 
+                # Upload to Supabase Storage if configured
+                clip_storage_path = None
+                sub_storage_path = None
+                if is_supabase_configured():
+                    try:
+                        from backend.services.supabase_service import SupabaseStorageService, to_uuid
+                        v_uuid = to_uuid(video_id)
+                        c_dest = f"{v_uuid}/clips/{clip_filename}"
+                        SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_CLIPS, clip_path, c_dest, "video/mp4")
+                        clip_storage_path = c_dest
+
+                        if vtt_path.exists():
+                            s_dest = f"{v_uuid}/subtitles/{clean_tid}.vtt"
+                            SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_SUBTITLES, vtt_path, s_dest, "text/vtt")
+                            sub_storage_path = s_dest
+                    except Exception as upload_err:
+                        print(f"Warning: Clip Supabase storage upload failed: {upload_err}")
+
                 justification = t.get("editorial_justification") or (t.get("why_selected", [""])[0] if t.get("why_selected") else "")
                 reason = justification or f"Concise {t.get('exchange_type', 'topic')} extraction"
 
@@ -396,6 +414,8 @@ class VideoCutter:
                     "clip_index": idx + 1,
                     "filename": clip_filename,
                     "filepath": str(clip_path),
+                    "storage_path": clip_storage_path,
+                    "subtitle_storage_path": sub_storage_path,
                     "start_time": round(start_t, 2),
                     "end_time": round(end_t, 2),
                     "duration": final_dur,

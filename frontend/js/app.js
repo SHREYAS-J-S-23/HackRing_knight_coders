@@ -27,8 +27,9 @@ document.addEventListener('DOMContentLoaded', () => {
     mergedVideoUrl: '',
     mergedVttUrl: '',
     apiBase: window.location.origin,
-    token: localStorage.getItem('vidara_token') || null,
-    user: JSON.parse(localStorage.getItem('vidara_user') || 'null'),
+    token: localStorage.getItem('vidara_token') || sessionStorage.getItem('vidara_token') || null,
+    user: JSON.parse(localStorage.getItem('vidara_user') || sessionStorage.getItem('vidara_user') || 'null'),
+    resetToken: null,
     videoTitle: '',
     activeClip: null
   };
@@ -41,19 +42,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const logoutBtn = document.getElementById('logoutBtn');
   const authModal = document.getElementById('authModal');
   const closeAuthModalBtn = document.getElementById('closeAuthModalBtn');
-  const tabAuthPhone = document.getElementById('tabAuthPhone');
-  const tabAuthGoogle = document.getElementById('tabAuthGoogle');
-  const panelAuthPhone = document.getElementById('panelAuthPhone');
-  const panelAuthGoogle = document.getElementById('panelAuthGoogle');
-  const authNameInput = document.getElementById('authNameInput');
-  const authPhoneInput = document.getElementById('authPhoneInput');
-  const sendOtpBtn = document.getElementById('sendOtpBtn');
-  const otpSection = document.getElementById('otpSection');
-  const otpDevBanner = document.getElementById('otpDevBanner');
-  const devOtpBadge = document.getElementById('devOtpBadge');
-  const authOtpInput = document.getElementById('authOtpInput');
-  const verifyOtpBtn = document.getElementById('verifyOtpBtn');
-  const directGoogleLoginBtn = document.getElementById('directGoogleLoginBtn');
 
   // Library & Saved Clips Elements
   const navLibraryBtn = document.getElementById('navLibraryBtn');
@@ -304,8 +292,8 @@ document.addEventListener('DOMContentLoaded', () => {
     updateStepIndicator(2);
     setStagePill('transcribe');
 
-    // STEP 1: Fire the analyze request — returns immediately (202 queued or 200 already-indexed)
-    const kickoffRes = await fetch(`${state.apiBase}/api/videos/${videoId}/analyze`, {
+    // STEP 1: Fire the analyze request — returns immediately (queued or already-indexed)
+    const kickoffRes = await apiFetch(`/api/videos/${videoId}/analyze`, {
       method: 'POST'
     });
     if (!kickoffRes.ok) {
@@ -313,6 +301,23 @@ document.addEventListener('DOMContentLoaded', () => {
       throw new Error(errMsg);
     }
     const kickoffData = await kickoffRes.json();
+
+    // Map backend stages to UI pill keys
+    const stageMap = {
+      'Media ingestion': 'upload',
+      'Audio extraction': 'audio',
+      'Audio Extracted': 'audio',
+      'Transcription': 'transcribe',
+      'Transcribing Audio': 'transcribe',
+      'Semantic indexing': 'index',
+      'Building Semantic Graph': 'index',
+      'Discovering Key Moments': 'topics',
+      'Topic discovery': 'topics',
+      'Importance ranking': 'rank',
+      'Boundary validation': 'boundaries',
+      'Ready': 'ready',
+      'Semantic Index Built': 'ready'
+    };
 
     // If the video was already indexed in a previous run, skip polling
     let analyzeData = null;
@@ -323,21 +328,23 @@ document.addEventListener('DOMContentLoaded', () => {
       analyzeData = await new Promise((resolve, reject) => {
         const poller = setInterval(async () => {
           try {
-            const sRes = await fetch(`${state.apiBase}/api/videos/${videoId}/status`);
+            const sRes = await apiFetch(`/api/videos/${videoId}/status`);
             if (!sRes.ok) return;
             const sData = await sRes.json();
 
             // Live progress display
-            const stage = sData.stage || 'Processing';
+            const stage = sData.stage || sData.current_stage || 'Processing';
             const msg = sData.message || 'Processing video intelligence...';
             const progress = Math.max(20, sData.progress || 30);
-            setProcessing(true, `${stage}...`, msg, progress, 'transcribe');
+            const pill = stageMap[stage] || 'transcribe';
+            setStagePill(pill);
+            setProcessing(true, `${stage}...`, msg, progress, pill);
 
             if (sData.status === 'completed') {
               clearInterval(poller);
               // STEP 3: Fetch the full result once done
               try {
-                const resultRes = await fetch(`${state.apiBase}/api/videos/${videoId}/analyze-result`);
+                const resultRes = await apiFetch(`/api/videos/${videoId}/analyze-result`);
                 if (!resultRes.ok) {
                   const errText = await resultRes.text();
                   reject(new Error(`Result fetch failed: ${errText}`));
@@ -350,16 +357,19 @@ document.addEventListener('DOMContentLoaded', () => {
               }
             } else if (sData.status === 'failed') {
               clearInterval(poller);
-              reject(new Error(sData.message || 'Analysis pipeline failed'));
+              reject(new Error(sData.message || sData.error || 'Analysis pipeline failed'));
             }
           } catch (e) {
             // Network hiccup — keep polling
           }
-        }, 1500);
+        }, 1200);
       });
     }
 
-    // analyzeData now holds the full result — same shape as before
+    if (analyzeData.status === 'failed') {
+      throw new Error(analyzeData.error || analyzeData.message || "Video analysis failed.");
+    }
+
     state.coreThesis = analyzeData.core_thesis;
     if (coreThesisText) coreThesisText.textContent = state.coreThesis;
 
@@ -401,15 +411,18 @@ document.addEventListener('DOMContentLoaded', () => {
     formData.append('file', state.selectedFile);
     state.videoTitle = state.selectedFile ? state.selectedFile.name : 'Uploaded Video';
 
+    if (!state.token) {
+      showToast("Please sign in or create an account to upload and process videos.", "info", 5000);
+      if (authModal) authModal.classList.remove('hidden');
+      if (typeof window.switchAuthView === 'function') window.switchAuthView('login');
+      setProcessing(false);
+      return;
+    }
+
     try {
       setStagePill('audio');
-      const uploadHeaders = {};
-      if (state.token) {
-        uploadHeaders['Authorization'] = `Bearer ${state.token}`;
-      }
-      const uploadRes = await fetch(`${state.apiBase}/api/videos/upload`, {
+      const uploadRes = await apiFetch('/api/videos/upload', {
         method: 'POST',
-        headers: uploadHeaders,
         body: formData
       });
 
@@ -441,19 +454,22 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    if (!state.token) {
+      showToast("Please sign in or create an account to import and analyze videos.", "info", 5000);
+      if (authModal) authModal.classList.remove('hidden');
+      if (typeof window.switchAuthView === 'function') window.switchAuthView('login');
+      return;
+    }
+
     setProcessing(true, "Importing Video from Link...", "Downloading stream with yt-dlp & extracting audio with FFmpeg...", 20, 'upload');
     updateStepIndicator(1);
     setStagePill('upload');
 
     try {
       setStagePill('audio');
-      const ingestHeaders = { 'Content-Type': 'application/json' };
-      if (state.token) {
-        ingestHeaders['Authorization'] = `Bearer ${state.token}`;
-      }
-      const ingestRes = await fetch(`${state.apiBase}/api/videos/ingest-url`, {
+      const ingestRes = await apiFetch('/api/videos/ingest-url', {
         method: 'POST',
-        headers: ingestHeaders,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: cleanUrl })
       });
 
@@ -565,15 +581,15 @@ document.addEventListener('DOMContentLoaded', () => {
     updateStepIndicator(3);
 
     try {
-      const res = await fetch(`${state.apiBase}/api/videos/${state.videoId}/query`, {
+      const res = await apiFetch(`/api/videos/${state.videoId}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: query, voice_input: false })
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Query failed");
+        const errMsg = await parseErrorResponse(res, "Query failed");
+        throw new Error(errMsg);
       }
 
       const data = await res.json();
@@ -705,7 +721,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setStagePill('topics');
 
     try {
-      const res = await fetch(`${state.apiBase}/api/videos/${state.videoId}/discover-topics`, {
+      const res = await apiFetch(`/api/videos/${state.videoId}/discover-topics`, {
         method: 'POST'
       });
 
@@ -1001,7 +1017,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const fullVideoUrl = state.selectedFile 
       ? URL.createObjectURL(state.selectedFile) 
-      : `${state.apiBase}/api/videos/${state.videoId}/stream`;
+      : getAuthenticatedMediaUrl(`${state.apiBase}/api/videos/${state.videoId}/stream`);
 
     if (activePreviewStopHandler) {
       finalVideoPlayer.removeEventListener('timeupdate', activePreviewStopHandler);
@@ -1110,7 +1126,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!clipUrl) {
       const endpoint = clip.video_url || clip.download_url || `/api/videos/${state.videoId}/clip/${clip.topic_id || clip.id}`;
-      clipUrl = `${state.apiBase}${endpoint}?t=${Date.now()}`;
+      clipUrl = getAuthenticatedMediaUrl(`${state.apiBase}${endpoint}?t=${Date.now()}`);
+    } else {
+      clipUrl = getAuthenticatedMediaUrl(clipUrl);
     }
 
     if (outputSection) {
@@ -1120,9 +1138,10 @@ document.addEventListener('DOMContentLoaded', () => {
     finalVideoPlayer.src = clipUrl;
     finalVideoPlayer.load();
 
-    const subUrl = clip.subtitle_url 
+    const rawSubUrl = clip.subtitle_url 
       ? `${state.apiBase}${clip.subtitle_url}` 
       : `${state.apiBase}/api/videos/${state.videoId}/clip/${clip.topic_id || clip.id}/subtitles`;
+    const subUrl = getAuthenticatedMediaUrl(rawSubUrl);
 
     if (videoSubtitlesTrack) {
       videoSubtitlesTrack.src = subUrl;
@@ -1323,7 +1342,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!state.videoId) return;
     setProcessing(true, "Rendering Individual Topic Clips...", `Deterministically rendering ${topicIds.length} clip(s) with FFmpeg (+80ms lead-in, +160ms tail-out)...`, 85, 'boundaries');
     try {
-      const res = await fetch(`${state.apiBase}/api/videos/${state.videoId}/generate-clips`, {
+      const res = await apiFetch(`/api/videos/${state.videoId}/generate-clips`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic_ids: topicIds })
@@ -1396,7 +1415,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setProcessing(true, "Merging Selected Clips...", `Assembling ${ids.length} verified clip(s) with deterministic FFmpeg concat...`, 90, 'boundaries');
     try {
-      const res = await fetch(`${state.apiBase}/api/videos/${state.videoId}/merge`, {
+      const res = await apiFetch(`/api/videos/${state.videoId}/merge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic_ids: ids })
@@ -1408,11 +1427,11 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       const data = await res.json();
-      state.mergedVideoUrl = `${state.apiBase}${data.video_url}?t=${Date.now()}`;
+      state.mergedVideoUrl = getAuthenticatedMediaUrl(`${state.apiBase}${data.video_url}?t=${Date.now()}`);
 
       // Refresh clips list in background
       try {
-        const clipsRes = await fetch(`${state.apiBase}/api/videos/${state.videoId}/clips`);
+        const clipsRes = await apiFetch(`/api/videos/${state.videoId}/clips`);
         if (clipsRes.ok) {
           const clipsData = await clipsRes.json();
           state.clips = clipsData.clips || [];
@@ -1601,16 +1620,85 @@ document.addEventListener('DOMContentLoaded', () => {
     return headers;
   }
 
+  function getAuthenticatedMediaUrl(url) {
+    if (!url || typeof url !== 'string') return url || '';
+    if (url.startsWith('blob:') || url.startsWith('data:')) return url;
+    if (!state.token) return url;
+    try {
+      const sep = url.includes('?') ? '&' : '?';
+      return `${url}${sep}token=${encodeURIComponent(state.token)}`;
+    } catch {
+      return url;
+    }
+  }
+
+  function saveSession(token, user, remember = true) {
+    state.token = token;
+    state.user = user;
+    if (remember) {
+      localStorage.setItem('vidara_token', token);
+      localStorage.setItem('vidara_user', JSON.stringify(user));
+      sessionStorage.removeItem('vidara_token');
+      sessionStorage.removeItem('vidara_user');
+    } else {
+      sessionStorage.setItem('vidara_token', token);
+      sessionStorage.setItem('vidara_user', JSON.stringify(user));
+      localStorage.removeItem('vidara_token');
+      localStorage.removeItem('vidara_user');
+    }
+    updateUserUI();
+  }
+
+  function clearSession() {
+    state.token = null;
+    state.user = null;
+    state.resetToken = null;
+    localStorage.removeItem('vidara_token');
+    localStorage.removeItem('vidara_user');
+    sessionStorage.removeItem('vidara_token');
+    sessionStorage.removeItem('vidara_user');
+    updateUserUI();
+  }
+
+  async function apiFetch(url, options = {}) {
+    const fullUrl = url.startsWith('http') ? url : `${state.apiBase}${url.startsWith('/') ? '' : '/'}${url}`;
+    const headers = Object.assign({}, options.headers || {});
+    if (state.token && !headers['Authorization']) {
+      headers['Authorization'] = `Bearer ${state.token}`;
+    }
+    const opts = Object.assign({}, options, { headers });
+    const response = await fetch(fullUrl, opts);
+
+    if (response.status === 401 && state.token) {
+      clearSession();
+      showToast("Session expired. Please sign in again.", "info");
+      if (authModal) authModal.classList.remove('hidden');
+      if (typeof window.switchAuthView === 'function') {
+        window.switchAuthView('login');
+        const loginAlert = document.getElementById('loginAlert');
+        if (loginAlert) {
+          loginAlert.textContent = "Your session has expired. Please sign in again.";
+          loginAlert.className = "auth-alert error";
+          loginAlert.classList.remove('hidden');
+        }
+      }
+    }
+    return response;
+  }
+
   function updateUserUI() {
     if (state.token && state.user) {
       if (authBtn) authBtn.classList.add('hidden');
       if (userProfilePill) userProfilePill.classList.remove('hidden');
-      if (userNameLabel) userNameLabel.textContent = state.user.name || 'User';
+      if (userNameLabel) {
+        userNameLabel.textContent = state.user.name || state.user.username || 'User';
+      }
       if (userAvatarMini) {
         if (state.user.avatar_url) {
           userAvatarMini.innerHTML = `<img src="${escapeHtml(state.user.avatar_url)}" alt="Avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
         } else {
-          const initial = (state.user.name || state.user.phone || 'U').charAt(0).toUpperCase();
+          const nameToUse = state.user.name || state.user.username || state.user.email || 'U';
+          const initial = nameToUse.charAt(0).toUpperCase();
           userAvatarMini.textContent = initial;
         }
       }
@@ -1628,21 +1716,15 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     try {
-      const res = await fetch(`${state.apiBase}/api/auth/me`, {
-        headers: getAuthHeaders(false)
-      });
+      const res = await apiFetch('/api/auth/me');
       if (res.ok) {
         const data = await res.json();
         state.user = data.user;
-        localStorage.setItem('vidara_user', JSON.stringify(state.user));
+        const storage = localStorage.getItem('vidara_token') ? localStorage : sessionStorage;
+        storage.setItem('vidara_user', JSON.stringify(state.user));
         updateUserUI();
       } else {
-        // Token expired or invalid
-        state.token = null;
-        state.user = null;
-        localStorage.removeItem('vidara_token');
-        localStorage.removeItem('vidara_user');
-        updateUserUI();
+        clearSession();
       }
     } catch (e) {
       console.warn("Could not check auth state:", e);
@@ -1653,9 +1735,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function refreshLibraryCount() {
     if (!state.token) return;
     try {
-      const res = await fetch(`${state.apiBase}/api/library/clips`, {
-        headers: getAuthHeaders(false)
-      });
+      const res = await apiFetch('/api/library/clips');
       if (res.ok) {
         const data = await res.json();
         const count = data.count || 0;
@@ -1671,6 +1751,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!state.token) {
       showToast("Please sign in to save clips permanently to your dashboard.", "info", 4000);
       if (authModal) authModal.classList.remove('hidden');
+      if (typeof window.switchAuthView === 'function') window.switchAuthView('login');
       return false;
     }
 
@@ -1687,9 +1768,9 @@ document.addEventListener('DOMContentLoaded', () => {
         download_url: clipData.download_url || clipData.video_url || ''
       };
 
-      const res = await fetch(`${state.apiBase}/api/library/clips/save`, {
+      const res = await apiFetch('/api/library/clips/save', {
         method: 'POST',
-        headers: getAuthHeaders(true),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
@@ -1709,12 +1790,169 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // -------------------------------------------------------------
-  // AUTHENTICATION MODAL LOGIC (Phone OTP & Google Sign-In)
+  // COMPLETE SUPABASE AUTHENTICATION CONTROLLER
   // -------------------------------------------------------------
   function initAuthUI() {
+    // Views
+    const authModalTitle = document.getElementById('authModalTitle');
+    const authModalSubtitle = document.getElementById('authModalSubtitle');
+    const viewAuthLogin = document.getElementById('viewAuthLogin');
+    const viewAuthSignup = document.getElementById('viewAuthSignup');
+    const viewAuthForgot = document.getElementById('viewAuthForgot');
+    const viewAuthReset = document.getElementById('viewAuthReset');
+    const viewAuthVerifyPending = document.getElementById('viewAuthVerifyPending');
+    const viewAuthCallback = document.getElementById('viewAuthCallback');
+
+    // Alerts
+    const loginAlert = document.getElementById('loginAlert');
+    const signupAlert = document.getElementById('signupAlert');
+    const forgotAlert = document.getElementById('forgotAlert');
+    const resetAlert = document.getElementById('resetAlert');
+
+    // Forms & Inputs
+    const loginForm = document.getElementById('loginForm');
+    const loginEmail = document.getElementById('loginEmail');
+    const loginPassword = document.getElementById('loginPassword');
+    const loginRememberMe = document.getElementById('loginRememberMe');
+    const loginSubmitBtn = document.getElementById('loginSubmitBtn');
+    const toggleLoginPassword = document.getElementById('toggleLoginPassword');
+    const linkForgotPassword = document.getElementById('linkForgotPassword');
+    const linkToSignUp = document.getElementById('linkToSignUp');
+    const googleLoginBtn = document.getElementById('googleLoginBtn');
+
+    const signupForm = document.getElementById('signupForm');
+    const signupUsername = document.getElementById('signupUsername');
+    const signupEmail = document.getElementById('signupEmail');
+    const signupPassword = document.getElementById('signupPassword');
+    const signupConfirmPassword = document.getElementById('signupConfirmPassword');
+    const signupSubmitBtn = document.getElementById('signupSubmitBtn');
+    const toggleSignupPassword = document.getElementById('toggleSignupPassword');
+    const toggleSignupConfirmPassword = document.getElementById('toggleSignupConfirmPassword');
+    const linkToLogin = document.getElementById('linkToLogin');
+    const googleSignupBtn = document.getElementById('googleSignupBtn');
+
+    const forgotForm = document.getElementById('forgotForm');
+    const forgotEmail = document.getElementById('forgotEmail');
+    const forgotSubmitBtn = document.getElementById('forgotSubmitBtn');
+    const linkBackToLoginFromForgot = document.getElementById('linkBackToLoginFromForgot');
+
+    const resetForm = document.getElementById('resetForm');
+    const resetNewPassword = document.getElementById('resetNewPassword');
+    const resetConfirmPassword = document.getElementById('resetConfirmPassword');
+    const resetSubmitBtn = document.getElementById('resetSubmitBtn');
+    const toggleResetNewPassword = document.getElementById('toggleResetNewPassword');
+    const toggleResetConfirmPassword = document.getElementById('toggleResetConfirmPassword');
+    const linkBackToLoginFromReset = document.getElementById('linkBackToLoginFromReset');
+
+    const verifyPendingEmailBadge = document.getElementById('verifyPendingEmailBadge');
+    const resendVerificationBtn = document.getElementById('resendVerificationBtn');
+    const linkBackToLoginFromVerify = document.getElementById('linkBackToLoginFromVerify');
+    const callbackStatusText = document.getElementById('callbackStatusText');
+
+    let pendingVerificationEmail = '';
+
+    // Alert helper
+    function showAlert(alertEl, message, isError = true) {
+      if (!alertEl) return;
+      alertEl.textContent = message;
+      alertEl.className = `auth-alert ${isError ? 'error' : 'success'}`;
+      alertEl.classList.remove('hidden');
+    }
+
+    function hideAlert(alertEl) {
+      if (!alertEl) return;
+      alertEl.classList.add('hidden');
+      alertEl.textContent = '';
+    }
+
+    // Password visibility toggle setup
+    function setupPasswordToggle(inputEl, btnEl) {
+      if (!inputEl || !btnEl) return;
+      btnEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        const isPassword = inputEl.type === 'password';
+        inputEl.type = isPassword ? 'text' : 'password';
+        const icon = btnEl.querySelector('i');
+        if (icon) {
+          icon.className = isPassword ? 'fa-regular fa-eye-slash' : 'fa-regular fa-eye';
+        }
+      });
+    }
+
+    setupPasswordToggle(loginPassword, toggleLoginPassword);
+    setupPasswordToggle(signupPassword, toggleSignupPassword);
+    setupPasswordToggle(signupConfirmPassword, toggleSignupConfirmPassword);
+    setupPasswordToggle(resetNewPassword, toggleResetNewPassword);
+    setupPasswordToggle(resetConfirmPassword, toggleResetConfirmPassword);
+
+    // View switcher
+    function switchAuthView(viewName, data = {}) {
+      const views = [viewAuthLogin, viewAuthSignup, viewAuthForgot, viewAuthReset, viewAuthVerifyPending, viewAuthCallback];
+      views.forEach(v => v && v.classList.add('hidden'));
+
+      hideAlert(loginAlert);
+      hideAlert(signupAlert);
+      hideAlert(forgotAlert);
+      hideAlert(resetAlert);
+
+      switch (viewName) {
+        case 'signup':
+          if (viewAuthSignup) viewAuthSignup.classList.remove('hidden');
+          if (authModalTitle) authModalTitle.textContent = 'Create Account';
+          if (authModalSubtitle) authModalSubtitle.textContent = 'Start analyzing long-form videos with autonomous topic discovery.';
+          if (signupUsername) signupUsername.focus();
+          break;
+        case 'forgot':
+          if (viewAuthForgot) viewAuthForgot.classList.remove('hidden');
+          if (authModalTitle) authModalTitle.textContent = 'Reset Password';
+          if (authModalSubtitle) authModalSubtitle.textContent = "We'll send you a secure link to reset your account password.";
+          if (forgotEmail) {
+            if (data.email) forgotEmail.value = data.email;
+            forgotEmail.focus();
+          }
+          break;
+        case 'reset':
+          if (viewAuthReset) viewAuthReset.classList.remove('hidden');
+          if (authModalTitle) authModalTitle.textContent = 'Set New Password';
+          if (authModalSubtitle) authModalSubtitle.textContent = 'Choose a new strong password for your Vidara account.';
+          if (resetNewPassword) resetNewPassword.focus();
+          break;
+        case 'verify_pending':
+          if (viewAuthVerifyPending) viewAuthVerifyPending.classList.remove('hidden');
+          if (authModalTitle) authModalTitle.textContent = 'Verify Your Email';
+          if (authModalSubtitle) authModalSubtitle.textContent = 'Please confirm your email address to activate your account.';
+          if (verifyPendingEmailBadge && data.email) {
+            verifyPendingEmailBadge.textContent = data.email;
+            pendingVerificationEmail = data.email;
+          }
+          break;
+        case 'callback':
+          if (viewAuthCallback) viewAuthCallback.classList.remove('hidden');
+          if (authModalTitle) authModalTitle.textContent = 'Authenticating...';
+          if (authModalSubtitle) authModalSubtitle.textContent = 'Verifying your credentials and synchronizing your workspace...';
+          if (callbackStatusText && data.status) callbackStatusText.textContent = data.status;
+          break;
+        case 'login':
+        default:
+          if (viewAuthLogin) viewAuthLogin.classList.remove('hidden');
+          if (authModalTitle) authModalTitle.textContent = 'Welcome to Vidara';
+          if (authModalSubtitle) authModalSubtitle.textContent = 'Sign in to save your clips and access your personal video library.';
+          if (loginEmail) {
+            if (data.email) loginEmail.value = data.email;
+            loginEmail.focus();
+          }
+          break;
+      }
+    }
+    window.switchAuthView = switchAuthView;
+
+    // View Navigation Links
     if (authBtn) {
       authBtn.addEventListener('click', () => {
-        if (authModal) authModal.classList.remove('hidden');
+        if (authModal) {
+          authModal.classList.remove('hidden');
+          switchAuthView('login');
+        }
       });
     }
 
@@ -1730,165 +1968,442 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
-    if (tabAuthPhone && tabAuthGoogle) {
-      tabAuthPhone.addEventListener('click', () => {
-        tabAuthPhone.classList.add('active');
-        tabAuthGoogle.classList.remove('active');
-        if (panelAuthPhone) panelAuthPhone.classList.remove('hidden');
-        if (panelAuthGoogle) panelAuthGoogle.classList.add('hidden');
-      });
-
-      tabAuthGoogle.addEventListener('click', () => {
-        tabAuthGoogle.classList.add('active');
-        tabAuthPhone.classList.remove('active');
-        if (panelAuthGoogle) panelAuthGoogle.classList.remove('hidden');
-        if (panelAuthPhone) panelAuthPhone.classList.add('hidden');
+    if (linkToSignUp) {
+      linkToSignUp.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAuthView('signup');
       });
     }
 
-    if (sendOtpBtn && authPhoneInput) {
-      sendOtpBtn.addEventListener('click', async () => {
-        const phone = authPhoneInput.value.trim();
-        if (!phone || phone.length < 7) {
-          alert("Please enter a valid phone number (e.g. +91 9876543210).");
-          authPhoneInput.focus();
-          return;
-        }
-
-        sendOtpBtn.disabled = true;
-        sendOtpBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending...';
-
-        try {
-          const res = await fetch(`${state.apiBase}/api/auth/phone/send-otp`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone })
-          });
-
-          if (!res.ok) {
-            const err = await parseErrorResponse(res, "Failed to send OTP");
-            throw new Error(err);
-          }
-
-          const data = await res.json();
-          if (otpSection) otpSection.classList.remove('hidden');
-          if (devOtpBadge && data.dev_otp) devOtpBadge.textContent = data.dev_otp;
-          if (authOtpInput) {
-            if (data.dev_otp) authOtpInput.value = data.dev_otp;
-            authOtpInput.focus();
-          }
-          showToast(`Verification code sent to ${phone}!`, "success");
-        } catch (e) {
-          showToast(e.message, "error");
-        } finally {
-          sendOtpBtn.disabled = false;
-          sendOtpBtn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Resend OTP';
-        }
+    if (linkToLogin) {
+      linkToLogin.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAuthView('login');
       });
     }
 
-    if (verifyOtpBtn) {
-      verifyOtpBtn.addEventListener('click', async () => {
-        const phone = authPhoneInput ? authPhoneInput.value.trim() : '';
-        const otp = authOtpInput ? authOtpInput.value.trim() : '';
-        const name = authNameInput ? authNameInput.value.trim() : '';
+    if (linkForgotPassword) {
+      linkForgotPassword.addEventListener('click', (e) => {
+        e.preventDefault();
+        const currentEmail = loginEmail ? loginEmail.value.trim() : '';
+        switchAuthView('forgot', { email: currentEmail });
+      });
+    }
 
-        if (!phone) {
-          alert("Phone number is required.");
+    if (linkBackToLoginFromForgot) {
+      linkBackToLoginFromForgot.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAuthView('login');
+      });
+    }
+
+    if (linkBackToLoginFromReset) {
+      linkBackToLoginFromReset.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAuthView('login');
+      });
+    }
+
+    if (linkBackToLoginFromVerify) {
+      linkBackToLoginFromVerify.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAuthView('login');
+      });
+    }
+
+    // Email & Password Validation Rules
+    function isValidEmail(email) {
+      return /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(email);
+    }
+
+    function isValidUsername(username) {
+      return /^[a-zA-Z0-9_]{3,30}$/.test(username);
+    }
+
+    function validatePasswordPolicy(password) {
+      if (password.length < 8) return "Password must be at least 8 characters long.";
+      if (!/[a-zA-Z]/.test(password)) return "Password must contain at least one letter.";
+      if (!/[0-9]/.test(password)) return "Password must contain at least one number.";
+      return null;
+    }
+
+    // 1. LOGIN SUBMISSION
+    if (loginForm) {
+      loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hideAlert(loginAlert);
+
+        const email = loginEmail ? loginEmail.value.trim() : '';
+        const password = loginPassword ? loginPassword.value : '';
+        const remember = loginRememberMe ? loginRememberMe.checked : true;
+
+        if (!email) {
+          showAlert(loginAlert, "Please enter your email address.");
+          loginEmail && loginEmail.focus();
           return;
         }
-        if (!otp || otp.length !== 6) {
-          alert("Please enter the 6-digit OTP verification code.");
-          authOtpInput && authOtpInput.focus();
+        if (!isValidEmail(email)) {
+          showAlert(loginAlert, "Please enter a valid email address.");
+          loginEmail && loginEmail.focus();
+          return;
+        }
+        if (!password) {
+          showAlert(loginAlert, "Please enter your password.");
+          loginPassword && loginPassword.focus();
           return;
         }
 
-        verifyOtpBtn.disabled = true;
-        verifyOtpBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
+        loginSubmitBtn.disabled = true;
+        loginSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Signing In...';
 
         try {
-          const res = await fetch(`${state.apiBase}/api/auth/phone/verify-otp`, {
+          const res = await fetch(`${state.apiBase}/api/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone, otp, name: name || undefined })
+            body: JSON.stringify({ email, password })
           });
 
+          const data = await res.json();
           if (!res.ok) {
-            const err = await parseErrorResponse(res, "Verification failed");
-            throw new Error(err);
+            throw new Error(data.detail || data.message || "Invalid email or password.");
           }
 
-          const data = await res.json();
-          state.token = data.token;
-          state.user = data.user;
-          localStorage.setItem('vidara_token', state.token);
-          localStorage.setItem('vidara_user', JSON.stringify(state.user));
-
+          saveSession(data.token, data.user, remember);
           if (authModal) authModal.classList.add('hidden');
-          updateUserUI();
-          showToast(`Welcome to Vidara, ${state.user.name || 'User'}!`, "success");
-        } catch (e) {
-          showToast(e.message, "error");
+          showToast(`Welcome back, ${data.user.name || data.user.username || 'Creator'}!`, "success");
+
+          // Reset inputs
+          if (loginPassword) loginPassword.value = '';
+
+        } catch (err) {
+          showAlert(loginAlert, err.message);
         } finally {
-          verifyOtpBtn.disabled = false;
-          verifyOtpBtn.innerHTML = '<i class="fa-solid fa-circle-check"></i> Verify & Enter Vidara';
+          loginSubmitBtn.disabled = false;
+          loginSubmitBtn.innerHTML = '<i class="fa-solid fa-arrow-right-to-bracket"></i> Sign In';
         }
       });
     }
 
-    if (directGoogleLoginBtn) {
-      directGoogleLoginBtn.addEventListener('click', async () => {
-        const defaultName = authNameInput ? authNameInput.value.trim() : '';
-        const userName = defaultName || prompt("Enter your Name for Google Sign-In:", "Vidara User") || "Google User";
-        const cleanEmail = userName.toLowerCase().replace(/[^a-z0-9]/g, '') + "@gmail.com";
+    // 2. SIGN UP SUBMISSION
+    if (signupForm) {
+      signupForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hideAlert(signupAlert);
 
-        directGoogleLoginBtn.disabled = true;
-        directGoogleLoginBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Connecting to Google...';
+        const username = signupUsername ? signupUsername.value.trim() : '';
+        const email = signupEmail ? signupEmail.value.trim() : '';
+        const password = signupPassword ? signupPassword.value : '';
+        const confirmPassword = signupConfirmPassword ? signupConfirmPassword.value : '';
+
+        if (!username) {
+          showAlert(signupAlert, "Please choose a username.");
+          signupUsername && signupUsername.focus();
+          return;
+        }
+        if (!isValidUsername(username)) {
+          showAlert(signupAlert, "Username must be 3–30 characters and contain only letters, numbers, and underscores.");
+          signupUsername && signupUsername.focus();
+          return;
+        }
+        if (!email || !isValidEmail(email)) {
+          showAlert(signupAlert, "Please enter a valid email address.");
+          signupEmail && signupEmail.focus();
+          return;
+        }
+
+        const pwdError = validatePasswordPolicy(password);
+        if (pwdError) {
+          showAlert(signupAlert, pwdError);
+          signupPassword && signupPassword.focus();
+          return;
+        }
+
+        if (password !== confirmPassword) {
+          showAlert(signupAlert, "Passwords do not match. Please re-enter.");
+          signupConfirmPassword && signupConfirmPassword.focus();
+          return;
+        }
+
+        signupSubmitBtn.disabled = true;
+        signupSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Creating Account...';
 
         try {
-          const res = await fetch(`${state.apiBase}/api/auth/google`, {
+          const res = await fetch(`${state.apiBase}/api/auth/signup`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              credential: `demo_google:${cleanEmail}:${userName}`,
-              name: userName
+              username,
+              email,
+              password,
+              confirm_password: confirmPassword
             })
           });
 
+          const data = await res.json();
           if (!res.ok) {
-            const err = await parseErrorResponse(res, "Google Sign-In failed");
-            throw new Error(err);
+            throw new Error(data.detail || data.message || "Failed to create account.");
           }
 
-          const data = await res.json();
-          state.token = data.token;
-          state.user = data.user;
-          localStorage.setItem('vidara_token', state.token);
-          localStorage.setItem('vidara_user', JSON.stringify(state.user));
+          if (data.status === 'verification_pending' || !data.token) {
+            switchAuthView('verify_pending', { email });
+          } else {
+            saveSession(data.token, data.user, true);
+            if (authModal) authModal.classList.add('hidden');
+            showToast(`Welcome to Vidara, ${data.user.username}!`, "success");
+            signupForm.reset();
+          }
 
-          if (authModal) authModal.classList.add('hidden');
-          updateUserUI();
-          showToast(`Signed in with Google as ${state.user.name}!`, "success");
-        } catch (e) {
-          showToast(e.message, "error");
+        } catch (err) {
+          showAlert(signupAlert, err.message);
         } finally {
-          directGoogleLoginBtn.disabled = false;
-          directGoogleLoginBtn.innerHTML = '<i class="fa-brands fa-google text-red"></i> <span>Continue with Google Account</span>';
+          signupSubmitBtn.disabled = false;
+          signupSubmitBtn.innerHTML = '<i class="fa-solid fa-user-plus"></i> Create Account';
         }
       });
     }
 
+    // 3. FORGOT PASSWORD SUBMISSION
+    if (forgotForm) {
+      forgotForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hideAlert(forgotAlert);
+
+        const email = forgotEmail ? forgotEmail.value.trim() : '';
+        if (!email || !isValidEmail(email)) {
+          showAlert(forgotAlert, "Please enter a valid email address.");
+          forgotEmail && forgotEmail.focus();
+          return;
+        }
+
+        forgotSubmitBtn.disabled = true;
+        forgotSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending Link...';
+
+        try {
+          const redirectUrl = `${window.location.origin}${window.location.pathname}`;
+          const res = await fetch(`${state.apiBase}/api/auth/forgot-password`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, redirect_url: redirectUrl })
+          });
+
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.detail || data.message || "Failed to send reset link.");
+          }
+
+          showAlert(forgotAlert, data.message || `Password reset link sent to ${email}. Please check your inbox.`, false);
+          if (forgotEmail) forgotEmail.value = '';
+
+        } catch (err) {
+          showAlert(forgotAlert, err.message);
+        } finally {
+          forgotSubmitBtn.disabled = false;
+          forgotSubmitBtn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Send Password Reset Link';
+        }
+      });
+    }
+
+    // 4. RESET PASSWORD SUBMISSION
+    if (resetForm) {
+      resetForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hideAlert(resetAlert);
+
+        const newPassword = resetNewPassword ? resetNewPassword.value : '';
+        const confirmPassword = resetConfirmPassword ? resetConfirmPassword.value : '';
+
+        const pwdError = validatePasswordPolicy(newPassword);
+        if (pwdError) {
+          showAlert(resetAlert, pwdError);
+          resetNewPassword && resetNewPassword.focus();
+          return;
+        }
+
+        if (newPassword !== confirmPassword) {
+          showAlert(resetAlert, "Passwords do not match.");
+          resetConfirmPassword && resetConfirmPassword.focus();
+          return;
+        }
+
+        resetSubmitBtn.disabled = true;
+        resetSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Updating...';
+
+        try {
+          const headers = { 'Content-Type': 'application/json' };
+          if (state.resetToken) {
+            headers['Authorization'] = `Bearer ${state.resetToken}`;
+          }
+
+          const res = await fetch(`${state.apiBase}/api/auth/reset-password`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              new_password: newPassword,
+              confirm_password: confirmPassword,
+              token: state.resetToken || undefined
+            })
+          });
+
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.detail || data.message || "Password update failed.");
+          }
+
+          showToast("Password updated successfully! Please sign in with your new password.", "success", 5000);
+          state.resetToken = null;
+          switchAuthView('login');
+
+        } catch (err) {
+          showAlert(resetAlert, err.message);
+        } finally {
+          resetSubmitBtn.disabled = false;
+          resetSubmitBtn.innerHTML = '<i class="fa-solid fa-key"></i> Update Password';
+        }
+      });
+    }
+
+    // 5. RESEND VERIFICATION EMAIL
+    if (resendVerificationBtn) {
+      resendVerificationBtn.addEventListener('click', async () => {
+        const emailToResend = pendingVerificationEmail || (signupEmail ? signupEmail.value.trim() : '');
+        if (!emailToResend) {
+          showToast("No pending email found to resend to.", "error");
+          return;
+        }
+        resendVerificationBtn.disabled = true;
+        resendVerificationBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Resending...';
+        try {
+          const res = await fetch(`${state.apiBase}/api/auth/resend-verification`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: emailToResend })
+          });
+          const data = await res.json();
+          showToast(data.message || `Verification link resent to ${emailToResend}!`, "success");
+        } catch (e) {
+          showToast("Could not resend email right now. Please try again later.", "error");
+        } finally {
+          resendVerificationBtn.disabled = false;
+          resendVerificationBtn.innerHTML = '<i class="fa-solid fa-arrow-rotate-right"></i> Resend Verification Email';
+        }
+      });
+    }
+
+    // 6. GOOGLE OAUTH FLOW
+    async function startGoogleOAuth() {
+      const targetRedirect = `${window.location.origin}${window.location.pathname}`;
+      try {
+        const res = await fetch(`${state.apiBase}/api/auth/google/url?redirect_to=${encodeURIComponent(targetRedirect)}`);
+        const data = await res.json();
+        if (res.ok && data.url) {
+          window.location.href = data.url;
+        } else {
+          showToast(data.detail || "Google OAuth is not configured on Supabase yet.", "error");
+        }
+      } catch (e) {
+        showToast(`Could not start Google Sign-In: ${e.message}`, "error");
+      }
+    }
+
+    if (googleLoginBtn) {
+      googleLoginBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        startGoogleOAuth();
+      });
+    }
+
+    if (googleSignupBtn) {
+      googleSignupBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        startGoogleOAuth();
+      });
+    }
+
+    // 7. OAUTH REDIRECT & RECOVERY URL HANDLER
+    function handleAuthUrlCallbacks() {
+      // Check hash params (Supabase default OAuth & magic link redirect)
+      const hash = window.location.hash ? window.location.hash.substring(1) : '';
+      if (hash && (hash.includes('access_token=') || hash.includes('error='))) {
+        const params = new URLSearchParams(hash);
+        const accessToken = params.get('access_token');
+        const type = params.get('type');
+        const errorDesc = params.get('error_description') || params.get('error');
+
+        // Clear hash immediately for privacy
+        window.history.replaceState(null, null, window.location.pathname + window.location.search);
+
+        if (errorDesc) {
+          showToast(`Authentication failed: ${decodeURIComponent(errorDesc)}`, "error", 5000);
+          return;
+        }
+
+        if (type === 'recovery' && accessToken) {
+          state.resetToken = accessToken;
+          if (authModal) authModal.classList.remove('hidden');
+          switchAuthView('reset');
+          showToast("Please set a new password for your account.", "info", 5000);
+          return;
+        }
+
+        if (accessToken) {
+          if (authModal) authModal.classList.remove('hidden');
+          switchAuthView('callback', { status: 'Verifying authenticated session...' });
+
+          // Fetch user profile with this token
+          fetch(`${state.apiBase}/api/auth/me`, {
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          })
+          .then(res => res.json())
+          .then(data => {
+            if (data.user) {
+              saveSession(accessToken, data.user, true);
+              if (authModal) authModal.classList.add('hidden');
+              showToast(`Welcome to Vidara, ${data.user.name || data.user.username || 'Creator'}!`, "success");
+            } else {
+              switchAuthView('login');
+              showAlert(loginAlert, "Could not load user profile.");
+            }
+          })
+          .catch(err => {
+            switchAuthView('login');
+            showAlert(loginAlert, `Authentication error: ${err.message}`);
+          });
+          return;
+        }
+      }
+
+      // Check query params (?code=... or ?token=...)
+      const urlParams = new URLSearchParams(window.location.search);
+      const queryToken = urlParams.get('token');
+      if (queryToken) {
+        urlParams.delete('token');
+        const newSearch = urlParams.toString() ? `?${urlParams.toString()}` : '';
+        window.history.replaceState(null, null, window.location.pathname + newSearch);
+
+        fetch(`${state.apiBase}/api/auth/me`, {
+          headers: { 'Authorization': `Bearer ${queryToken}` }
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.user) {
+            saveSession(queryToken, data.user, true);
+            showToast(`Welcome back, ${data.user.name || data.user.username || 'Creator'}!`, "success");
+          }
+        })
+        .catch(() => {});
+      }
+    }
+
+    handleAuthUrlCallbacks();
+
+    // 8. LOGOUT ACTION
     if (logoutBtn) {
       logoutBtn.addEventListener('click', async () => {
-        if (!confirm("Are you sure you want to sign out? Your saved clips will remain safely preserved in your dashboard.")) return;
+        if (!confirm("Are you sure you want to sign out? Your saved clips and projects will remain securely preserved in Supabase.")) return;
         try {
-          await fetch(`${state.apiBase}/api/auth/logout`, { method: 'POST' });
+          await apiFetch('/api/auth/logout', { method: 'POST' });
         } catch (_) {}
-        state.token = null;
-        state.user = null;
-        localStorage.removeItem('vidara_token');
-        localStorage.removeItem('vidara_user');
-        updateUserUI();
+        clearSession();
         showToast("You have been signed out.", "info");
       });
     }
@@ -2126,6 +2641,7 @@ document.addEventListener('DOMContentLoaded', () => {
       videos.forEach(v => {
         const row = document.createElement('div');
         row.className = 'saved-video-row';
+        row.id = `libVideoRow_${v.id}`;
         row.innerHTML = `
           <div>
             <h4 style="font-size:0.92rem; font-weight:600; color:#fff; margin-bottom:4px;">
@@ -2137,9 +2653,12 @@ document.addEventListener('DOMContentLoaded', () => {
               <span>Added: ${v.created_at ? v.created_at.slice(0, 10) : 'Recent'}</span>
             </div>
           </div>
-          <div>
+          <div style="display:flex; gap:8px;">
             <button class="btn-ghost btn-sm load-video-project-btn" data-id="${v.id}" data-filename="${escapeHtml(v.filename)}" data-duration="${v.duration}">
               <i class="fa-solid fa-arrow-up-right-from-square"></i> Open
+            </button>
+            <button class="btn-danger-outline btn-sm delete-video-project-btn" data-id="${v.id}" data-filename="${escapeHtml(v.filename)}" title="Delete project permanently">
+              <i class="fa-solid fa-trash-can"></i>
             </button>
           </div>
         `;
@@ -2164,6 +2683,38 @@ document.addEventListener('DOMContentLoaded', () => {
           showToast(`Loaded "${fname}" into active workspace.`, "success");
 
           previewAtTimestamp(0, null, fname);
+        });
+      });
+
+      savedVideosList.querySelectorAll('.delete-video-project-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const vid = btn.getAttribute('data-id');
+          const fname = btn.getAttribute('data-filename');
+          if (!confirm(`Are you sure you want to delete "${fname}" and all its analysis, clips, and storage files?`)) return;
+
+          btn.disabled = true;
+          btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+
+          try {
+            const delRes = await apiFetch(`/api/videos/${vid}`, { method: 'DELETE' });
+            if (!delRes.ok) throw new Error("Could not delete video project");
+
+            if (state.videoId === vid) {
+              state.videoId = null;
+              state.duration = 0;
+              state.clips = [];
+              state.topics = [];
+              if (videoPreviewBar) videoPreviewBar.classList.add('hidden');
+            }
+
+            showToast(`Deleted "${fname}".`, "info");
+            loadLibraryVideos();
+          } catch (err) {
+            showToast(err.message, "error");
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-trash-can"></i>';
+          }
         });
       });
 

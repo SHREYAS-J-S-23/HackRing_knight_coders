@@ -54,17 +54,22 @@ class AudioExtractor:
         return output_path
 
     @staticmethod
-    def split_audio(audio_path: Path, chunk_duration: float = 600.0) -> list:
+    def split_audio(
+        audio_path: Path,
+        chunk_duration: float = 300.0,
+        overlap: float = 2.0
+    ) -> list:
         """
-        Splits a long audio file into smaller chunks (e.g. 10 minutes each)
-        to guarantee file sizes stay under Groq Whisper's 25MB limit.
+        Splits a long audio file into smaller chunks with boundary overlap
+        to guarantee file sizes stay under Groq Whisper's 25MB limit and prevent
+        clipped words at chunk boundaries.
         Returns a list of tuples: [(chunk_path, start_offset_seconds), ...]
         """
         ffmpeg_bin = get_ffmpeg_executable()
         total_duration = AudioExtractor.get_audio_duration(audio_path)
         
         # If already short and under 20MB, no need to split
-        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+        file_size_mb = audio_path.stat().st_size / (1024 * 1024) if audio_path.exists() else 0.0
         if total_duration <= chunk_duration and file_size_mb < 20.0:
             return [(audio_path, 0.0)]
 
@@ -73,7 +78,8 @@ class AudioExtractor:
         current_start = 0.0
 
         while current_start < total_duration:
-            duration_to_cut = min(chunk_duration, total_duration - current_start)
+            # Add overlap to duration_to_cut, bounded by total_duration
+            duration_to_cut = min(chunk_duration + overlap, total_duration - current_start)
             chunk_file = audio_path.parent / f"{audio_path.stem}_chunk_{chunk_idx}.mp3"
 
             cmd = [
@@ -106,7 +112,7 @@ class AudioExtractor:
                 if chunk_file.exists():
                     chunks.append((chunk_file, current_start))
 
-            current_start += duration_to_cut
+            current_start += chunk_duration
             chunk_idx += 1
 
         return chunks if chunks else [(audio_path, 0.0)]

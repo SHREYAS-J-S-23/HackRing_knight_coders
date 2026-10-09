@@ -83,3 +83,13 @@ async def get_user_videos(current_user: Dict[str, Any] = Depends(get_current_use
         "count": len(videos),
         "videos": videos
     }
+
+@router.delete("/videos/{video_id}")
+async def delete_user_video(video_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Permanently deletes a video project and its derived clips for this user."""
+    user_id = current_user["id"]
+    DatabaseService.delete_video(video_id=video_id, user_id=user_id)
+    return {
+        "status": "success",
+        "message": "Video project successfully removed."
+    }

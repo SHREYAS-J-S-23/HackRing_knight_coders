@@ -4,10 +4,10 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 
-from backend.services.auth_service import get_optional_current_user
+from backend.services.auth_service import get_current_user, get_optional_current_user
 
 from backend.config import (
     UPLOAD_DIR,
@@ -16,7 +16,13 @@ from backend.config import (
     get_groq_api_key,
     get_groq_stt_api_key,
     get_groq_llm_api_key,
-    set_groq_api_key
+    set_groq_api_key,
+    is_supabase_configured,
+    SUPABASE_STORAGE_BUCKET_VIDEOS,
+    SUPABASE_STORAGE_BUCKET_AUDIO,
+    SUPABASE_STORAGE_BUCKET_CLIPS,
+    SUPABASE_STORAGE_BUCKET_SUBTITLES,
+    SUPABASE_STORAGE_BUCKET_EXPORTS,
 )
 from backend.database import DatabaseService
 from backend.services.audio_extractor import AudioExtractor
@@ -41,7 +47,34 @@ router = APIRouter(tags=["Vidara Video Intelligence"])
 # In-memory fast cache for active sessions
 VIDEO_CACHE: Dict[str, Dict[str, Any]] = {}
 
-def get_session_data(video_id: str) -> Dict[str, Any]:
+
+def verify_video_access(video_id: str, user_id: str) -> Dict[str, Any]:
+    """
+    Strict ownership verification dependency helper.
+    Ensures that only the authenticated owner can access this video and its derived assets.
+    """
+    vid = DatabaseService.get_video(video_id)
+    if not vid:
+        raise HTTPException(status_code=404, detail="Video session not found.")
+
+    owner = vid.get("user_id")
+    if owner:
+        from backend.services.supabase_service import to_uuid
+        is_owner = (str(owner) == str(user_id)) or (to_uuid(owner) == to_uuid(user_id))
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not have permission to access this video.")
+    else:
+        # Legacy/unowned record: claim ownership for authenticated user
+        DatabaseService.claim_video_ownership(video_id, user_id)
+        vid["user_id"] = user_id
+
+    return vid
+
+
+def get_session_data(video_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    if user_id:
+        verify_video_access(video_id, user_id)
+
     if video_id in VIDEO_CACHE:
         return VIDEO_CACHE[video_id]
     
@@ -79,7 +112,7 @@ def get_session_data(video_id: str) -> Dict[str, Any]:
         "video_id": video_id,
         "filename": vid["filename"],
         "video_path": vid["filepath"],
-        "audio_path": vid["audio_path"],
+        "audio_path": vid.get("audio_path", ""),
         "duration": vid["duration"],
         "transcript": transcript_obj,
         "topics": [DiscoveredTopic(**t) for t in topics] if topics else [],
@@ -94,7 +127,7 @@ def get_session_data(video_id: str) -> Dict[str, Any]:
 async def upload_video(
     file: UploadFile = File(...), 
     groq_api_key: Optional[str] = Form(None),
-    current_user: Optional[Dict[str, Any]] = Depends(get_optional_current_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Step 1: Upload video file, extract audio with FFmpeg, and initialize database record.
@@ -126,6 +159,21 @@ async def upload_video(
         duration = AudioExtractor.get_video_duration(saved_video_path)
 
         user_id = current_user["id"] if current_user else None
+
+        # Upload to Supabase Storage if configured
+        storage_path = None
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseStorageService, to_uuid
+                u_prefix = to_uuid(user_id) if user_id else "anonymous"
+                v_uuid = to_uuid(video_id)
+                storage_dest = f"{u_prefix}/{v_uuid}/original{ext}"
+                SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_VIDEOS, saved_video_path, storage_dest, "video/mp4")
+                if audio_path and Path(audio_path).exists():
+                    SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_AUDIO, audio_path, f"{u_prefix}/{v_uuid}/audio.mp3", "audio/mpeg")
+                storage_path = storage_dest
+            except Exception as supa_err:
+                print(f"Warning: Supabase upload on upload_video failed: {supa_err}")
 
         # Save to database
         DatabaseService.save_video(
@@ -185,7 +233,7 @@ async def upload_video(
 @router.post("/videos/ingest-url")
 async def ingest_video_url(
     req: IngestUrlRequest,
-    current_user: Optional[Dict[str, Any]] = Depends(get_optional_current_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Step 1 (Alternative): Ingests video from a web link (YouTube, Vimeo, Loom, or direct .mp4),
@@ -206,12 +254,24 @@ async def ingest_video_url(
     from backend.services.link_downloader import LinkDownloader
 
     try:
-        user_id = current_user["id"] if current_user else None
+        user_id = current_user["id"]
         res = LinkDownloader.download_video_from_url(req.url.strip(), user_id=user_id)
         video_id = res["video_id"]
         filename = res["filename"]
         duration = res["duration_seconds"]
         filesize = res["filesize"]
+
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseStorageService, to_uuid
+                u_prefix = to_uuid(user_id)
+                v_uuid = to_uuid(video_id)
+                ext = Path(filename).suffix or ".mp4"
+                SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_VIDEOS, res["filepath"], f"{u_prefix}/{v_uuid}/original{ext}", "video/mp4")
+                if res.get("audio_path") and Path(res["audio_path"]).exists():
+                    SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_AUDIO, res["audio_path"], f"{u_prefix}/{v_uuid}/audio.mp3", "audio/mpeg")
+            except Exception as supa_err:
+                print(f"Warning: Supabase upload on ingest_link failed: {supa_err}")
 
         DatabaseService.set_job(
             job_id=f"job_{video_id}",
@@ -220,7 +280,8 @@ async def ingest_video_url(
             status="completed",
             progress=20,
             stage="Audio Extracted",
-            message=f"Imported from link: {filename} ({round(duration, 1)}s). Ready for intelligence analysis."
+            message=f"Imported from link: {filename} ({round(duration, 1)}s). Ready for intelligence analysis.",
+            user_id=user_id
         )
 
         VIDEO_CACHE[video_id] = {
@@ -246,18 +307,17 @@ async def ingest_video_url(
         raise HTTPException(status_code=400, detail=f"Failed to ingest video from link: {str(e)}")
 
 
-def _run_analysis_pipeline(video_id: str) -> None:
+def _run_analysis_pipeline(video_id: str, user_id: Optional[str] = None) -> None:
     """
     Internal background worker: Transcribes audio with Whisper, builds semantic index.
     Runs outside the request context so the HTTP response is not blocked.
     """
-    import copy
     session = VIDEO_CACHE.get(video_id) or {}
 
     # Reload from DB if not in cache
     if not session:
         try:
-            session = get_session_data(video_id)
+            session = get_session_data(video_id, user_id=user_id)
         except Exception:
             return
 
@@ -270,7 +330,8 @@ def _run_analysis_pipeline(video_id: str) -> None:
         status="processing",
         progress=40,
         stage="Transcribing Audio",
-        message="Running Groq Whisper Large-v3 with word timestamps..."
+        message="Running Groq Whisper Large-v3 with word timestamps...",
+        user_id=user_id
     )
 
     try:
@@ -300,7 +361,8 @@ def _run_analysis_pipeline(video_id: str) -> None:
             status="processing",
             progress=65,
             stage="Building Semantic Graph",
-            message=f"Transcribed {len(transcript.segments)} segments. Building Intent Graph..."
+            message=f"Transcribed {len(transcript.segments)} segments. Building Intent Graph...",
+            user_id=user_id
         )
 
         # Build Core Thesis using SemanticEngine
@@ -317,7 +379,8 @@ def _run_analysis_pipeline(video_id: str) -> None:
             status="processing",
             progress=85,
             stage="Discovering Key Moments",
-            message="Evaluating podcast exchanges, takeaways & topic boundaries..."
+            message="Evaluating podcast exchanges, takeaways & topic boundaries...",
+            user_id=user_id
         )
 
         # Pre-seed and persist topics immediately from Intent Graph themes
@@ -341,7 +404,8 @@ def _run_analysis_pipeline(video_id: str) -> None:
                 "segment_count": len(transcript.segments),
                 "topic_count": len(discovered_topics),
                 "topics": [t.model_dump() for t in discovered_topics]
-            }
+            },
+            user_id=user_id
         )
 
     except Exception as e:
@@ -353,24 +417,34 @@ def _run_analysis_pipeline(video_id: str) -> None:
             progress=0,
             stage="Failed",
             message=str(e),
-            error=str(e)
+            error=str(e),
+            user_id=user_id
         )
 
 
 @router.post("/videos/{video_id}/analyze")
-async def analyze_video(video_id: str, background_tasks: BackgroundTasks):
+async def analyze_video(
+    video_id: str,
+    background_tasks: BackgroundTasks,
+    wait: bool = False,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     Step 2: Kicks off background transcription + semantic indexing and returns immediately.
     Poll /videos/{video_id}/status to track progress.
     Once status is 'completed', fetch full results from /videos/{video_id}/analyze-result.
+    Supports ?wait=true for synchronous test calls.
     """
-    session = get_session_data(video_id)
+    verify_video_access(video_id, current_user["id"])
+    session = get_session_data(video_id, user_id=current_user["id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Video session not found.")
 
     # If already completed (re-run guard), return result directly
     job = DatabaseService.get_job(f"job_{video_id}")
 
     # Guard 1: job record with result payload (from new runs that store result)
-    if job and job.get("status") == "completed" and job.get("result"):
+    if job and job.get("status") == "completed" and job.get("result") and not wait:
         result = job["result"]
         return {
             "status": "success",
@@ -380,7 +454,7 @@ async def analyze_video(video_id: str, background_tasks: BackgroundTasks):
         }
 
     # Guard 2: transcript already in cache/session (in-memory fast path)
-    if session.get("transcript"):
+    if session.get("transcript") and not wait:
         topics = session.get("topics") or [t for t in DatabaseService.get_topics(video_id)]
         thesis = ""
         ig = session.get("intent_graph")
@@ -401,7 +475,7 @@ async def analyze_video(video_id: str, background_tasks: BackgroundTasks):
 
     # Guard 3: segments already in DB (e.g., server restarted but DB is persistent)
     existing_segs = DatabaseService.get_segments(video_id)
-    if existing_segs and len(existing_segs) > 0:
+    if existing_segs and len(existing_segs) > 0 and not wait:
         existing_topics = DatabaseService.get_topics(video_id)
         vid = DatabaseService.get_video(video_id)
         return {
@@ -415,11 +489,31 @@ async def analyze_video(video_id: str, background_tasks: BackgroundTasks):
         }
 
     # Guard 4: already running — don't double-queue
-    if job and job.get("status") in ("queued", "processing"):
+    if job and job.get("status") in ("queued", "processing") and not wait:
         return {
             "status": "queued",
             "video_id": video_id,
             "message": "Analysis already in progress. Poll /api/videos/{video_id}/status for progress."
+        }
+
+    if wait:
+        _run_analysis_pipeline(video_id, user_id=current_user["id"])
+        job = DatabaseService.get_job(f"job_{video_id}")
+        if job and job.get("status") == "failed":
+            raise HTTPException(status_code=500, detail=job.get("error", "Analysis failed"))
+        result = (job or {}).get("result") or {}
+        if not result.get("topics"):
+            result["topics"] = DatabaseService.get_topics(video_id)
+            result["topic_count"] = len(result["topics"])
+        if not result.get("core_thesis"):
+            vid = DatabaseService.get_video(video_id)
+            result["core_thesis"] = (vid or {}).get("core_thesis", "")
+        if not result.get("segment_count"):
+            result["segment_count"] = len(DatabaseService.get_segments(video_id))
+        return {
+            "status": "success",
+            "video_id": video_id,
+            **result
         }
 
     # Mark as queued
@@ -430,11 +524,12 @@ async def analyze_video(video_id: str, background_tasks: BackgroundTasks):
         status="queued",
         progress=10,
         stage="Queued",
-        message="Analysis pipeline queued. Starting Whisper transcription..."
+        message="Analysis pipeline queued. Starting Whisper transcription...",
+        user_id=current_user["id"]
     )
 
     # Kick off the heavy work in the background
-    background_tasks.add_task(_run_analysis_pipeline, video_id)
+    background_tasks.add_task(_run_analysis_pipeline, video_id, current_user["id"])
 
     return {
         "status": "queued",
@@ -444,11 +539,15 @@ async def analyze_video(video_id: str, background_tasks: BackgroundTasks):
 
 
 @router.get("/videos/{video_id}/analyze-result")
-async def get_analyze_result(video_id: str):
+async def get_analyze_result(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     Returns the full analysis result (topics, core_thesis, segment_count) once the pipeline is done.
     Returns 202 if still processing, 200 with data when complete.
     """
+    verify_video_access(video_id, current_user["id"])
     job = DatabaseService.get_job(f"job_{video_id}")
     if not job:
         raise HTTPException(status_code=404, detail="Analysis job not found. Did you call /analyze first?")
@@ -492,16 +591,20 @@ async def get_analyze_result(video_id: str):
 
 
 @router.post("/videos/{video_id}/discover-topics")
-async def discover_topics(video_id: str):
+async def discover_topics(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     MODE B: DISCOVER IMPORTANT TOPICS
     Executes Vidara Topic Intelligence Engine to extract, cluster, graph, score, and rank topics.
     """
-    session = get_session_data(video_id)
+    verify_video_access(video_id, current_user["id"])
+    session = get_session_data(video_id, user_id=current_user["id"])
     if not session.get("transcript"):
         # Auto-run analysis inline (blocking) so we have a transcript before proceeding
-        _run_analysis_pipeline(video_id)
-        session = get_session_data(video_id)
+        _run_analysis_pipeline(video_id, user_id=current_user["id"])
+        session = get_session_data(video_id, user_id=current_user["id"])
 
     transcript = session.get("transcript")
     core_thesis = session.get("intent_graph", None)
@@ -515,7 +618,8 @@ async def discover_topics(video_id: str):
         status="processing",
         progress=80,
         stage="Discovering Topics",
-        message="Computing Topic Graph, PageRank centrality, and multi-feature importance..."
+        message="Computing Topic Graph, PageRank centrality, and multi-feature importance...",
+        user_id=current_user["id"]
     )
 
     try:
@@ -534,7 +638,8 @@ async def discover_topics(video_id: str):
             progress=100,
             stage="Topics Discovered",
             message=f"Discovered and ranked {len(topics)} meaningful topics.",
-            result={"total_topics": len(topics)}
+            result={"total_topics": len(topics)},
+            user_id=current_user["id"]
         )
 
         return {
@@ -548,16 +653,20 @@ async def discover_topics(video_id: str):
 
 
 @router.post("/videos/{video_id}/query")
-async def query_video(video_id: str, req: UserQueryRequest):
+async def query_video(
+    video_id: str,
+    req: UserQueryRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     MODE A: ASK VIDARA (Text or Voice)
     Retrieves semantically relevant sections matching the user's query without retranscribing.
     """
-    session = get_session_data(video_id)
+    verify_video_access(video_id, current_user["id"])
+    session = get_session_data(video_id, user_id=current_user["id"])
     if not session.get("transcript"):
-        # Run analysis inline (blocking) so we have a transcript before querying
-        _run_analysis_pipeline(video_id)
-        session = get_session_data(video_id)
+        _run_analysis_pipeline(video_id, user_id=current_user["id"])
+        session = get_session_data(video_id, user_id=current_user["id"])
 
     engine = VidaraTopicIntelligenceEngine()
     existing_topics = session.get("topics") or []
@@ -587,11 +696,16 @@ async def query_video(video_id: str, req: UserQueryRequest):
 
 
 @router.post("/videos/{video_id}/generate-clips")
-async def generate_clips(video_id: str, req: GenerateClipsRequest):
+async def generate_clips(
+    video_id: str,
+    req: GenerateClipsRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     Step 7 & 8: Generates individual video clips for selected topics with padding and faststart.
     """
-    session = get_session_data(video_id)
+    verify_video_access(video_id, current_user["id"])
+    session = get_session_data(video_id, user_id=current_user["id"])
     all_topics = session.get("topics") or []
     if not all_topics:
         raise HTTPException(status_code=400, detail="No topics have been discovered yet.")
@@ -643,9 +757,13 @@ async def generate_clips(video_id: str, req: GenerateClipsRequest):
 
 
 @router.get("/videos/{video_id}/stream")
-async def stream_full_video(video_id: str):
+async def stream_full_video(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Stream full original video with HTTP 206 Partial Content Range support for scene preview."""
-    session = get_session_data(video_id)
+    verify_video_access(video_id, current_user["id"])
+    session = get_session_data(video_id, user_id=current_user["id"])
     video_path = Path(session["video_path"]) if session.get("video_path") else None
     if not video_path or not video_path.exists():
         video_path = UPLOAD_DIR / f"{video_id}.mp4"
@@ -666,12 +784,17 @@ async def stream_full_video(video_id: str):
 
 
 @router.post("/videos/{video_id}/merge")
-async def merge_clips(video_id: str, req: MergeClipsRequest):
+async def merge_clips(
+    video_id: str,
+    req: MergeClipsRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     Step 9: Merges only the user's selected clips into a final unified master video.
     Preserves +80ms lead-in, +160ms tail-out, PTS normalization, and faststart.
     """
-    session = get_session_data(video_id)
+    verify_video_access(video_id, current_user["id"])
+    session = get_session_data(video_id, user_id=current_user["id"])
     all_clips = session.get("clips") or DatabaseService.get_clips(video_id)
     all_topics = session.get("topics") or [DiscoveredTopic(**t) for t in DatabaseService.get_topics(video_id)]
 
@@ -721,12 +844,24 @@ async def merge_clips(video_id: str, req: MergeClipsRequest):
 
     final_merged = VideoCutter.merge_clip_files(clip_paths, output_path)
 
+    export_storage_path = None
+    if is_supabase_configured():
+        try:
+            from backend.services.supabase_service import SupabaseStorageService, to_uuid
+            u_prefix = to_uuid(current_user["id"])
+            v_uuid = to_uuid(video_id)
+            export_storage_path = f"{u_prefix}/{v_uuid}/exports/{merged_filename}"
+            SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_EXPORTS, output_path, export_storage_path, "video/mp4")
+        except Exception as supa_err:
+            print(f"Warning: Supabase upload on merge_clips failed: {supa_err}")
+
     total_merged_dur = sum(c.get("duration", 0.0) for c in target_clips)
 
     return {
         "status": "success",
         "video_id": video_id,
         "merged_filename": merged_filename,
+        "storage_path": export_storage_path,
         "video_url": f"/api/videos/{video_id}/final",
         "download_url": f"/api/videos/{video_id}/final",
         "clip_count": len(clip_paths),
@@ -735,40 +870,121 @@ async def merge_clips(video_id: str, req: MergeClipsRequest):
 
 
 @router.get("/videos/{video_id}/topics")
-async def get_topics(video_id: str):
+async def get_topics(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Retrieves ranked topics for the video."""
+    verify_video_access(video_id, current_user["id"])
     topics = DatabaseService.get_topics(video_id)
     return {"video_id": video_id, "topics": topics}
 
 
 @router.get("/videos/{video_id}/clips")
-async def get_clips(video_id: str):
+async def get_clips(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Retrieves generated clips for the video."""
+    verify_video_access(video_id, current_user["id"])
     clips = DatabaseService.get_clips(video_id)
     return {"video_id": video_id, "clips": clips}
 
 
 @router.get("/videos/{video_id}/status")
-async def get_status(video_id: str):
-    """Retrieves current processing job status."""
+@router.get("/videos/{video_id}/job-status")
+async def get_job_status(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Retrieves full background processing job status and metrics.
+    Exposes real stage, percentage, chunks, elapsed time, retries, and results.
+    """
+    verify_video_access(video_id, current_user["id"])
     job = DatabaseService.get_job(f"job_{video_id}")
+    vid = DatabaseService.get_video(video_id)
+
     if not job:
-        vid = DatabaseService.get_video(video_id)
         if vid:
-            return {"video_id": video_id, "status": vid["status"], "progress": 100, "stage": "Ready", "message": "Video indexed."}
-        raise HTTPException(status_code=404, detail="Job not found.")
+            topics = DatabaseService.get_topics(video_id)
+            segs = DatabaseService.get_segments(video_id)
+            return {
+                "video_id": video_id,
+                "job_id": f"job_{video_id}",
+                "status": "completed" if vid["status"] == "indexed" else vid["status"],
+                "progress": 100 if vid["status"] == "indexed" else 20,
+                "stage": "Ready" if vid["status"] == "indexed" else "Media ingestion",
+                "message": "Video indexed and ready.",
+                "chunks_completed": 0,
+                "chunks_total": 0,
+                "elapsed_seconds": 0.0,
+                "retries": 0,
+                "error": None,
+                "core_thesis": vid.get("core_thesis", ""),
+                "segment_count": len(segs),
+                "topic_count": len(topics),
+                "topics": topics
+            }
+        raise HTTPException(status_code=404, detail="Analysis job not found.")
+
+    topics = []
+    segs = []
+    core_thesis = ""
+    if job.get("status") == "completed" or (vid and vid.get("status") == "indexed"):
+        topics = DatabaseService.get_topics(video_id)
+        segs = DatabaseService.get_segments(video_id)
+        core_thesis = vid.get("core_thesis", "") if vid else ""
+
     return {
         "video_id": video_id,
+        "job_id": job.get("id", f"job_{video_id}"),
         "status": job["status"],
-        "progress": job["progress"],
-        "stage": job["current_stage"],
-        "message": job["message"]
+        "progress": job.get("progress", 0),
+        "stage": job.get("stage") or job.get("current_stage", "Processing"),
+        "message": job.get("message", ""),
+        "chunks_completed": job.get("chunks_completed", 0),
+        "chunks_total": job.get("chunks_total", 0),
+        "elapsed_seconds": job.get("elapsed_seconds", 0.0),
+        "retries": job.get("retries", 0),
+        "error": job.get("error"),
+        "core_thesis": core_thesis,
+        "segment_count": len(segs),
+        "topic_count": len(topics),
+        "topics": topics,
+        "performance_stats": job.get("result", {})
     }
 
 
+@router.get("/videos/{video_id}/progress/stream")
+async def stream_progress(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Server-Sent Events (SSE) stream yielding real-time job progress events."""
+    verify_video_access(video_id, current_user["id"])
+    import asyncio
+    from fastapi.responses import StreamingResponse
+
+    async def event_generator():
+        while True:
+            job_info = await get_job_status(video_id, current_user=current_user)
+            yield f"data: {json.dumps(job_info)}\n\n"
+            if job_info.get("status") in ("completed", "failed"):
+                break
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @router.get("/videos/{video_id}/clip/{topic_id}")
-async def stream_clip(video_id: str, topic_id: str):
+async def stream_clip(
+    video_id: str,
+    topic_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Stream or download an individual topic clip with HTTP 206 Range support."""
+    verify_video_access(video_id, current_user["id"])
     clean_tid = topic_id.replace(f"{video_id}_", "")
     candidates = [
         OUTPUT_DIR / f"{video_id}_{clean_tid}.mp4",
@@ -784,6 +1000,24 @@ async def stream_clip(video_id: str, topic_id: str):
             clip_path = matches[0]
 
     if not clip_path or not clip_path.exists():
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseStorageService, to_uuid
+                v_uuid = to_uuid(video_id)
+                storage_path = f"{v_uuid}/clips/{video_id}_{clean_tid}.mp4"
+                # Try downloading locally first for streaming
+                download_dest = OUTPUT_DIR / f"{video_id}_{clean_tid}.mp4"
+                downloaded = SupabaseStorageService.download_file(SUPABASE_STORAGE_BUCKET_CLIPS, storage_path, download_dest)
+                if downloaded and downloaded.exists():
+                    clip_path = downloaded
+                else:
+                    signed_url = SupabaseStorageService.create_signed_url(SUPABASE_STORAGE_BUCKET_CLIPS, storage_path)
+                    if signed_url:
+                        return RedirectResponse(url=signed_url)
+            except Exception as supa_err:
+                print(f"Warning: Supabase clip retrieval failed: {supa_err}")
+
+    if not clip_path or not clip_path.exists():
         raise HTTPException(status_code=404, detail="Clip file not found.")
 
     return FileResponse(
@@ -795,8 +1029,13 @@ async def stream_clip(video_id: str, topic_id: str):
 
 
 @router.get("/videos/{video_id}/clip/{topic_id}/subtitles")
-async def get_clip_subtitles(video_id: str, topic_id: str):
+async def get_clip_subtitles(
+    video_id: str,
+    topic_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Stream or download synchronized WebVTT subtitles with speaker tags for an individual clip."""
+    verify_video_access(video_id, current_user["id"])
     clean_tid = topic_id.replace(f"{video_id}_", "")
     candidates = [
         OUTPUT_DIR / f"{video_id}_{clean_tid}.vtt",
@@ -804,7 +1043,23 @@ async def get_clip_subtitles(video_id: str, topic_id: str):
         OUTPUT_DIR / f"{video_id}_{topic_id}.vtt",
     ]
     vtt_path = next((p for p in candidates if p.exists()), None)
-    if not vtt_path:
+    if not vtt_path and is_supabase_configured():
+        try:
+            from backend.services.supabase_service import SupabaseStorageService, to_uuid
+            v_uuid = to_uuid(video_id)
+            sub_storage_path = f"{v_uuid}/subtitles/{clean_tid}.vtt"
+            download_dest = OUTPUT_DIR / f"{video_id}_{clean_tid}.vtt"
+            downloaded = SupabaseStorageService.download_file(SUPABASE_STORAGE_BUCKET_SUBTITLES, sub_storage_path, download_dest)
+            if downloaded and downloaded.exists():
+                vtt_path = downloaded
+            else:
+                signed_url = SupabaseStorageService.create_signed_url(SUPABASE_STORAGE_BUCKET_SUBTITLES, sub_storage_path)
+                if signed_url:
+                    return RedirectResponse(url=signed_url)
+        except Exception as supa_err:
+            print(f"Warning: Supabase subtitle retrieval failed: {supa_err}")
+
+    if not vtt_path or not vtt_path.exists():
         raise HTTPException(status_code=404, detail="Subtitles not found for this clip.")
 
     return FileResponse(
@@ -816,8 +1071,12 @@ async def get_clip_subtitles(video_id: str, topic_id: str):
 
 
 @router.get("/videos/{video_id}/final")
-async def stream_final(video_id: str):
+async def stream_final(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Stream or download the final merged video."""
+    verify_video_access(video_id, current_user["id"])
     merged_filename = f"{video_id}_selected_master.mp4"
     output_path = OUTPUT_DIR / merged_filename
     if not output_path.exists():
@@ -835,6 +1094,39 @@ async def stream_final(video_id: str):
         media_type="video/mp4",
         headers={"Content-Disposition": f'inline; filename="{merged_filename}"'}
     )
+
+
+@router.get("/videos/{video_id}/transcript")
+async def get_transcript(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Retrieves full indexed transcript segments for the video."""
+    verify_video_access(video_id, current_user["id"])
+    segments = DatabaseService.get_segments(video_id)
+    return {"video_id": video_id, "segment_count": len(segments), "segments": segments}
+
+
+@router.delete("/videos/{video_id}")
+async def delete_video(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Deletes a video and all associated segments, topics, clips, and storage files."""
+    verify_video_access(video_id, current_user["id"])
+    DatabaseService.delete_video(video_id=video_id, user_id=current_user["id"])
+    if video_id in VIDEO_CACHE:
+        del VIDEO_CACHE[video_id]
+    return {"status": "success", "message": "Video successfully deleted."}
+
+
+@router.get("/videos")
+async def list_videos(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Retrieves all videos uploaded or owned by the authenticated user."""
+    videos = DatabaseService.get_user_videos(current_user["id"])
+    return {"status": "success", "count": len(videos), "videos": videos}
 
 
 class ApiKeysRequest(BaseModel):
@@ -877,3 +1169,39 @@ async def update_keys(req: ApiKeysRequest):
         "status": "success",
         "message": "Groq credentials successfully updated and active for this session."
     }
+
+
+class ClipSelectionRequest(BaseModel):
+    clip_id: str
+    position: Optional[int] = 0
+    selected: Optional[bool] = True
+
+
+@router.post("/videos/{video_id}/select-clip")
+async def save_clip_selection(
+    video_id: str,
+    req: ClipSelectionRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Persists user clip selection and playlist ordering in Supabase clip_selections."""
+    verify_video_access(video_id, current_user["id"])
+    res = DatabaseService.save_clip_selection(
+        user_id=current_user["id"],
+        video_id=video_id,
+        clip_id=req.clip_id,
+        position=req.position or 0,
+        selected=req.selected if req.selected is not None else True
+    )
+    return {"status": "success", "selection": res}
+
+
+@router.get("/videos/{video_id}/selections")
+async def get_clip_selections(
+    video_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Retrieves user clip selections and playlist ordering."""
+    verify_video_access(video_id, current_user["id"])
+    selections = DatabaseService.get_clip_selections(user_id=current_user["id"], video_id=video_id)
+    return {"video_id": video_id, "selections": selections}
+

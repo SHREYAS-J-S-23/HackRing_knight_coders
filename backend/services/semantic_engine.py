@@ -3,11 +3,13 @@ import re
 from typing import Optional, List, Dict, Any
 from groq import Groq
 from openai import OpenAI
+import hashlib
 from backend.config import (
     get_groq_api_key,
     get_groq_llm_api_key,
     GROQ_MODEL,
     GROQ_FALLBACK_MODEL,
+    REASONING_TIMEOUT_SECONDS,
     AGNES_API_KEY,
     AGNES_BASE_URL
 )
@@ -21,6 +23,9 @@ from backend.models.schemas import (
     EditDecision
 )
 
+# In-memory cache for computed Intent Graphs
+INTENT_GRAPH_CACHE: Dict[str, IntentGraph] = {}
+
 class SemanticEngine:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or get_groq_llm_api_key()
@@ -28,9 +33,9 @@ class SemanticEngine:
     def _get_client(self):
         key = self.api_key or get_groq_llm_api_key()
         if key:
-            return Groq(api_key=key), GROQ_MODEL, GROQ_FALLBACK_MODEL
+            return Groq(api_key=key, timeout=REASONING_TIMEOUT_SECONDS), GROQ_MODEL, GROQ_FALLBACK_MODEL
         elif AGNES_API_KEY:
-            return OpenAI(api_key=AGNES_API_KEY, base_url=AGNES_BASE_URL), "agnes-3.0-flash", "agnes-3.0-flash"
+            return OpenAI(api_key=AGNES_API_KEY, base_url=AGNES_BASE_URL, timeout=REASONING_TIMEOUT_SECONDS), "agnes-3.0-flash", "agnes-3.0-flash"
         else:
             raise ValueError(
                 "GROQ_API_KEY is not configured! Please provide your Groq API key in .env or via the Keys button."
@@ -80,8 +85,7 @@ class SemanticEngine:
         for m in models:
             if m and m not in model_queue:
                 model_queue.append(m)
-        if "qwen/qwen3.8-27b" not in model_queue:
-            model_queue.append("qwen/qwen3.8-27b")
+        model_queue = model_queue[:2]  # Strictly bounded to primary and 1 controlled fallback
 
         for model in model_queue:
             # 1. Attempt with response_format={"type": "json_object"}
@@ -272,7 +276,14 @@ class SemanticEngine:
         Performs deep semantic analysis of the transcript.
         Guarantees prompt tokens stay <= 3,500 tokens to strictly respect
         Groq's 8,000 TPM limit, and provides multi-model + heuristic fallback.
+        Caches result by transcript signature to prevent redundant LLM invocations.
         """
+        cache_key = hashlib.sha256(
+            f"{transcript.video_id}_{len(transcript.segments)}_{transcript.segments[0].text if transcript.segments else ''}".encode("utf-8")
+        ).hexdigest()
+        if cache_key in INTENT_GRAPH_CACHE:
+            return INTENT_GRAPH_CACHE[cache_key]
+
         client, primary_model, fallback_model = self._get_client()
 
         raw_segs = transcript.segments
@@ -379,7 +390,9 @@ Return STRICTLY a JSON object matching this schema:
 
         if not data:
             print("Vidara: All LLM models failed or were rate-limited. Falling back to heuristic Intent Graph.")
-            return self._heuristic_build_intent_graph(transcript)
+            fallback_graph = self._heuristic_build_intent_graph(transcript)
+            INTENT_GRAPH_CACHE[cache_key] = fallback_graph
+            return fallback_graph
 
         # Build block lookup
         block_map = {b["block_id"]: b for b in transcript_payload}
@@ -454,12 +467,14 @@ Return STRICTLY a JSON object matching this schema:
 
         annotated.sort(key=lambda x: x.start)
 
-        return IntentGraph(
+        graph = IntentGraph(
             video_id=transcript.video_id,
             core_thesis=data.get("core_thesis") or f"Discussion and core insights from {transcript.filename or 'video'}.",
             themes=themes,
             annotated_segments=annotated
         )
+        INTENT_GRAPH_CACHE[cache_key] = graph
+        return graph
 
     def generate_edl(self, transcript: EnrichedTranscript, intent_graph: IntentGraph, audience: AudienceProfile) -> EditDecisionList:
         """

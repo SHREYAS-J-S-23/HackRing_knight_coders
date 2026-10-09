@@ -1,10 +1,12 @@
+import os
 import re
 import math
+import time
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from backend.config import get_ffmpeg_executable
+from backend.config import get_ffmpeg_executable, DIARIZATION_MODE
 from backend.models.schemas import EnrichedTranscript, TranscriptSegment, WordTimestamp
 
 class SpeakerDiarizationService:
@@ -13,15 +15,15 @@ class SpeakerDiarizationService:
     Combines acoustic signal analysis (pitch, spectral energy, zero-crossing rate via FFmpeg/SciPy)
     with conversational dialogue linguistics (turn-taking, question-response dynamics, address terms).
     
-    Guarantees:
-    - Associates speaker ID, timestamps, text, and confidence with each segment and word.
-    - Does NOT use arbitrary speaker labels or assume the first speaker is always the host.
-    - Distinguishes observed speaker identity (SPEAKER_00, SPEAKER_01) from inferred roles (HOST, GUEST).
-    - If roles cannot be determined reliably, retains neutral labels.
+    Modes:
+    - FAST: Skip acoustic signal analysis; rely on conversational linguistic turn-taking cues (0 FFmpeg calls).
+    - STANDARD: Lightweight turn dynamics and speaker-alternation heuristics.
+    - PRECISE: Acoustic feature extraction using single-pass audio decode (1 FFmpeg pass total, no per-segment process spawns).
     """
 
-    def __init__(self, num_speakers_hint: Optional[int] = None):
+    def __init__(self, num_speakers_hint: Optional[int] = None, mode: Optional[str] = None):
         self.num_speakers_hint = num_speakers_hint
+        self.mode = (mode or DIARIZATION_MODE or "FAST").upper()
 
     def diarize_transcript(
         self,
@@ -30,7 +32,9 @@ class SpeakerDiarizationService:
     ) -> EnrichedTranscript:
         """
         Diarizes all segments in the transcript, assigning speaker IDs and estimating roles.
+        Measures diarization time accurately.
         """
+        start_time = time.time()
         segments = transcript.segments
         if not segments:
             return transcript
@@ -43,15 +47,16 @@ class SpeakerDiarizationService:
             for s in segments:
                 s.speaker_role = roles.get(s.speaker, "UNKNOWN")
                 s.speaker_confidence = s.speaker_confidence or 0.90
+            transcript.diarization_time_seconds = round(time.time() - start_time, 3)
             return transcript
 
-        # 2. Extract acoustic turn signals if audio file is accessible
+        # 2. Extract acoustic turn signals if PRECISE mode is active and audio file is accessible
         acoustic_clusters = {}
-        if audio_path and Path(audio_path).exists():
+        if self.mode == "PRECISE" and audio_path and Path(audio_path).exists():
             try:
                 acoustic_clusters = self._extract_acoustic_clusters(audio_path, segments)
             except Exception as e:
-                print(f"Vidara Diarization: Acoustic extraction notice: {e}, falling back to conversational turn model.")
+                print(f"Vidara Diarization: Acoustic extraction notice ({e}), falling back to conversational turn model.")
 
         # 3. Conversational Linguistic Turn Analysis
         assigned_speakers = self._cluster_conversational_turns(segments, acoustic_clusters)
@@ -69,16 +74,11 @@ class SpeakerDiarizationService:
             s.speaker_confidence = round(spk_conf, 2)
             s.speaker_role = roles.get(spk_id, "UNKNOWN")
 
-            # Propagate to word timestamps
-            if s.words:
-                for w in s.words:
-                    # Words inherit the segment's speaker
-                    pass
-
+        transcript.diarization_time_seconds = round(time.time() - start_time, 3)
         return transcript
 
     # -------------------------------------------------------------------------
-    # ACOUSTIC FEATURE EXTRACTION (SCIPY & FFMPEG)
+    # ACOUSTIC FEATURE EXTRACTION (SCIPY & SINGLE-PASS FFMPEG)
     # -------------------------------------------------------------------------
     def _extract_acoustic_clusters(
         self,
@@ -87,11 +87,12 @@ class SpeakerDiarizationService:
     ) -> Dict[int, str]:
         """
         Extracts sample audio features for segments and clusters them into distinct voices.
+        OPTIMIZATION: Decodes audio to 16kHz mono WAV in a SINGLE pass, slicing in-memory
+        instead of launching separate FFmpeg processes per segment.
         """
         import numpy as np
         from scipy.cluster.vq import kmeans2
 
-        # Sample up to 60 non-trivial segments (> 1.2s) across timeline
         valid_segs = [s for s in segments if (s.end - s.start) >= 1.2 and len(s.text.split()) >= 3]
         if len(valid_segs) < 4:
             return {}
@@ -103,55 +104,56 @@ class SpeakerDiarizationService:
         seg_ids_used = []
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            for s in sample_segs:
-                sample_file = Path(tmpdir) / f"seg_{s.id}.wav"
-                dur = min(3.0, s.end - s.start)
-                cmd = [
-                    ffmpeg_bin,
-                    "-y",
-                    "-ss", f"{s.start:.2f}",
-                    "-i", str(audio_path),
-                    "-t", f"{dur:.2f}",
-                    "-ar", "16000",
-                    "-ac", "1",
-                    "-f", "wav",
-                    str(sample_file)
-                ]
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if res.returncode == 0 and sample_file.exists() and sample_file.stat().st_size > 1000:
-                    try:
-                        # Read raw 16-bit PCM bytes
-                        with open(sample_file, "rb") as f:
-                            f.seek(44)  # Skip standard WAV header
-                            pcm_data = np.frombuffer(f.read(), dtype=np.int16).astype(np.float32)
-                        
-                        if len(pcm_data) > 1600:
-                            # Feature 1: Zero-crossing rate (spectral proxy)
-                            zcr = np.mean(np.abs(np.diff(np.sign(pcm_data))))
+            pcm_wav = Path(tmpdir) / "full_16k_mono.wav"
+            # Single-pass decode of audio to 16kHz mono WAV (max 1 FFmpeg process)
+            cmd = [
+                ffmpeg_bin,
+                "-y",
+                "-i", str(audio_path),
+                "-vn",
+                "-ar", "16000",
+                "-ac", "1",
+                "-f", "wav",
+                str(pcm_wav)
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode == 0 and pcm_wav.exists() and pcm_wav.stat().st_size > 1000:
+                try:
+                    with open(pcm_wav, "rb") as f:
+                        f.seek(44)  # Skip 44-byte WAV header
+                        all_pcm = np.frombuffer(f.read(), dtype=np.int16).astype(np.float32)
+
+                    for s in sample_segs:
+                        start_idx = int(s.start * 16000)
+                        dur_samples = int(min(3.0, s.end - s.start) * 16000)
+                        end_idx = min(len(all_pcm), start_idx + dur_samples)
+
+                        if end_idx - start_idx > 1600:
+                            pcm_slice = all_pcm[start_idx:end_idx]
+                            # Feature 1: Zero-crossing rate
+                            zcr = np.mean(np.abs(np.diff(np.sign(pcm_slice))))
                             # Feature 2: RMS energy
-                            rms = np.sqrt(np.mean(pcm_data ** 2))
+                            rms = np.sqrt(np.mean(pcm_slice ** 2))
                             # Feature 3: Autocorrelation peak (pitch proxy)
-                            corr = np.correlate(pcm_data[:2000], pcm_data[:2000], mode="full")
+                            corr = np.correlate(pcm_slice[:2000], pcm_slice[:2000], mode="full")
                             corr = corr[len(corr)//2:]
                             peak_lag = np.argmax(corr[40:400]) + 40 if len(corr) >= 400 else 100
                             pitch_proxy = 16000.0 / max(1, peak_lag)
 
                             features.append([float(pitch_proxy), float(zcr * 1000), float(rms)])
                             seg_ids_used.append(s.id)
-                    except Exception:
-                        pass
+                except Exception as e:
+                    print(f"Vidara Acoustic Clustering error: {e}")
 
         if len(features) < 6:
             return {}
 
         feats_np = np.array(features)
-        # Standardize features
         feats_std = (feats_np - np.mean(feats_np, axis=0)) / (np.std(feats_np, axis=0) + 1e-6)
 
         k = self.num_speakers_hint or 2
         centroids, labels = kmeans2(feats_std, k=k, minit="points")
 
-        # Map segment IDs to clusters
         cluster_map = {}
         for sid, label in zip(seg_ids_used, labels):
             cluster_map[sid] = f"SPEAKER_{label:02d}"

@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from backend.config import BASE_DIR
+from backend.config import BASE_DIR, is_supabase_configured
 
 DB_PATH = BASE_DIR / "storage" / "vidara.db"
 
@@ -186,6 +186,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS analysis_jobs (
         id TEXT PRIMARY KEY,
         video_id TEXT NOT NULL,
+        user_id TEXT,
         job_type TEXT NOT NULL,
         status TEXT DEFAULT 'pending',
         progress INTEGER DEFAULT 0,
@@ -195,6 +196,28 @@ def init_db():
         error TEXT,
         created_at REAL,
         updated_at REAL
+    );
+    """)
+
+    try:
+        cursor.execute("ALTER TABLE analysis_jobs ADD COLUMN user_id TEXT;")
+    except Exception:
+        pass
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS transcript_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        time_offset REAL NOT NULL,
+        duration REAL DEFAULT 0.0,
+        segments_json TEXT NOT NULL,
+        status TEXT DEFAULT 'completed',
+        retries INTEGER DEFAULT 0,
+        latency REAL DEFAULT 0.0,
+        error TEXT,
+        created_at REAL,
+        UNIQUE(video_id, chunk_index)
     );
     """)
 
@@ -209,6 +232,15 @@ def init_db():
         FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
     );
     """)
+
+    # Performance optimization: Database Indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_segments_vid ON transcript_segments(video_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_segments_vid_time ON transcript_segments(video_id, start_time);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_topics_vid ON topics(video_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_clips_vid ON clips(video_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_vid ON analysis_jobs(video_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON analysis_jobs(status);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chunks_vid ON transcript_chunks(video_id);")
 
     conn.commit()
     conn.close()
@@ -227,6 +259,21 @@ class DatabaseService:
         conn.commit()
         conn.close()
 
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                SupabaseDbService.save_video(
+                    video_id=video_id,
+                    filename=filename,
+                    filepath=filepath,
+                    audio_path=audio_path,
+                    duration=duration,
+                    filesize=filesize,
+                    user_id=user_id
+                )
+            except Exception as e:
+                print(f"Warning: Supabase save_video error: {e}")
+
     @staticmethod
     def update_video_status(video_id: str, status: str, core_thesis: str = None) -> None:
         conn = get_db_connection()
@@ -237,8 +284,24 @@ class DatabaseService:
         conn.commit()
         conn.close()
 
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                SupabaseDbService.update_video_status(video_id=video_id, status=status, core_thesis=core_thesis)
+            except Exception as e:
+                print(f"Warning: Supabase update_video_status error: {e}")
+
     @staticmethod
     def get_video(video_id: str) -> Optional[Dict[str, Any]]:
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                supa_vid = SupabaseDbService.get_video(video_id)
+                if supa_vid:
+                    return supa_vid
+            except Exception as e:
+                print(f"Warning: Supabase get_video error: {e}")
+
         conn = get_db_connection()
         row = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
         conn.close()
@@ -246,22 +309,25 @@ class DatabaseService:
 
     @staticmethod
     def save_segments(video_id: str, segments: List[Dict[str, Any]]) -> None:
+        """Batch-persists transcript segments with batch embedding and transaction."""
         from backend.services.ai_providers import EmbeddingProvider
 
-        conn = get_db_connection()
-        # Delete existing segments for this video
-        conn.execute("DELETE FROM transcript_segments WHERE video_id = ?", (video_id,))
+        if not segments:
+            return
+
+        # Precompute any missing embeddings in bulk
+        missing_texts = [s.get("text", "") for s in segments if not s.get("embedding") and s.get("text")]
+        batch_embeddings = EmbeddingProvider.embed_batch(missing_texts) if missing_texts else []
+        emb_iter = iter(batch_embeddings)
+
+        rows = []
         for s in segments:
             text = s.get("text", "")
             emb = s.get("embedding")
             if not emb and text:
-                emb = EmbeddingProvider.embed_text(text)
+                emb = next(emb_iter, [])
 
-            conn.execute("""
-                INSERT INTO transcript_segments 
-                (video_id, segment_index, start_time, end_time, text, speaker, words_json, embedding_json, candidate_topics_json, category)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
+            rows.append((
                 video_id,
                 s.get("segment_index", s.get("id", 0)),
                 s.get("start", s.get("start_time", 0.0)),
@@ -273,17 +339,45 @@ class DatabaseService:
                 json.dumps(s.get("candidate_topics", [])),
                 s.get("category", "SUPPORTING")
             ))
-        conn.commit()
-        conn.close()
+
+        conn = get_db_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM transcript_segments WHERE video_id = ?", (video_id,))
+                conn.executemany("""
+                    INSERT INTO transcript_segments 
+                    (video_id, segment_index, start_time, end_time, text, speaker, words_json, embedding_json, candidate_topics_json, category)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, rows)
+        finally:
+            conn.close()
+
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                SupabaseDbService.save_segments(video_id=video_id, segments=segments)
+            except Exception as e:
+                print(f"Warning: Supabase save_segments error: {e}")
 
     @staticmethod
     def get_segments(video_id: str) -> List[Dict[str, Any]]:
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                supa_segs = SupabaseDbService.get_segments(video_id)
+                if supa_segs:
+                    return supa_segs
+            except Exception as e:
+                print(f"Warning: Supabase get_segments error: {e}")
+
         conn = get_db_connection()
         rows = conn.execute("SELECT * FROM transcript_segments WHERE video_id = ? ORDER BY start_time ASC", (video_id,)).fetchall()
         conn.close()
         results = []
         for r in rows:
             d = dict(r)
+            d["start"] = d.get("start_time", 0.0)
+            d["end"] = d.get("end_time", 0.0)
             d["words"] = json.loads(d["words_json"]) if d["words_json"] else []
             d["embedding"] = json.loads(d["embedding_json"]) if d["embedding_json"] else []
             d["candidate_topics"] = json.loads(d["candidate_topics_json"]) if d["candidate_topics_json"] else []
@@ -325,48 +419,137 @@ class DatabaseService:
 
     @staticmethod
     def save_topics(video_id: str, topics: List[Dict[str, Any]]) -> None:
+        """Batch-persists discovered topics using executemany inside a transaction."""
+        if not topics:
+            return
+
+        rows = []
+        for t in topics:
+            tid = t["id"]
+            if not tid.startswith(video_id):
+                tid = f"{video_id}_{tid}"
+            rows.append((
+                tid,
+                video_id,
+                t["name"],
+                t.get("description", ""),
+                t["start_time"],
+                t["end_time"],
+                t.get("importance_score", 0.0),
+                t.get("confidence", 0.0),
+                t.get("coverage_score", 0.0),
+                t.get("depth_score", 0.0),
+                t.get("centrality_score", 0.0),
+                json.dumps(t.get("subtopics", [])),
+                json.dumps(t.get("why_selected", [])),
+                json.dumps(t.get("segment_ids", [])),
+                t.get("status", "discovered"),
+                t.get("exchange_type", "GENERAL_TOPIC"),
+                json.dumps(t.get("speakers_involved", [])),
+                json.dumps(t.get("speaker_roles", {})),
+                1 if t.get("question_included") else 0,
+                1 if t.get("depends_on_question") else 0,
+                t.get("editorial_justification", "")
+            ))
+
         conn = get_db_connection()
         try:
-            conn.execute("DELETE FROM topics WHERE video_id = ?", (video_id,))
-            for t in topics:
-                tid = t["id"]
-                if not tid.startswith(video_id):
-                    tid = f"{video_id}_{tid}"
-                conn.execute("""
+            with conn:
+                conn.execute("DELETE FROM topics WHERE video_id = ?", (video_id,))
+                conn.executemany("""
                     INSERT OR REPLACE INTO topics 
                     (id, video_id, name, description, start_time, end_time, importance_score, confidence,
                      coverage_score, depth_score, centrality_score, subtopics_json, why_selected_json, segment_ids_json, status,
                      exchange_type, speakers_involved_json, speaker_roles_json, question_included, depends_on_question, editorial_justification)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, rows)
+        finally:
+            conn.close()
+
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                SupabaseDbService.save_topics(video_id=video_id, topics=topics)
+            except Exception as e:
+                print(f"Warning: Supabase save_topics error: {e}")
+
+    # -------------------------------------------------------------
+    # CHUNK CHECKPOINT RESUMPTION
+    # -------------------------------------------------------------
+    @staticmethod
+    def save_chunk_checkpoint(
+        video_id: str,
+        chunk_index: int,
+        time_offset: float,
+        duration: float,
+        segments_data: List[Dict[str, Any]],
+        retries: int = 0,
+        latency: float = 0.0,
+        status: str = "completed",
+        error: str = ""
+    ) -> None:
+        """Persists successful or failed chunk state for resumption without retranscribing."""
+        conn = get_db_connection()
+        try:
+            with conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO transcript_chunks
+                    (video_id, chunk_index, time_offset, duration, segments_json, status, retries, latency, error, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    tid,
                     video_id,
-                    t["name"],
-                    t.get("description", ""),
-                    t["start_time"],
-                    t["end_time"],
-                    t.get("importance_score", 0.0),
-                    t.get("confidence", 0.0),
-                    t.get("coverage_score", 0.0),
-                    t.get("depth_score", 0.0),
-                    t.get("centrality_score", 0.0),
-                    json.dumps(t.get("subtopics", [])),
-                    json.dumps(t.get("why_selected", [])),
-                    json.dumps(t.get("segment_ids", [])),
-                    t.get("status", "discovered"),
-                    t.get("exchange_type", "GENERAL_TOPIC"),
-                    json.dumps(t.get("speakers_involved", [])),
-                    json.dumps(t.get("speaker_roles", {})),
-                    1 if t.get("question_included") else 0,
-                    1 if t.get("depends_on_question") else 0,
-                    t.get("editorial_justification", "")
+                    chunk_index,
+                    time_offset,
+                    duration,
+                    json.dumps(segments_data),
+                    status,
+                    retries,
+                    round(latency, 3),
+                    error,
+                    time.time()
                 ))
-            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_chunk_checkpoints(video_id: str) -> List[Dict[str, Any]]:
+        """Retrieves previously completed chunk checkpoints for this video."""
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM transcript_chunks WHERE video_id = ? ORDER BY chunk_index ASC",
+                (video_id,)
+            ).fetchall()
+            results = []
+            for r in rows:
+                d = dict(r)
+                d["segments"] = json.loads(d["segments_json"]) if d["segments_json"] else []
+                results.append(d)
+            return results
+        finally:
+            conn.close()
+
+    @staticmethod
+    def clear_chunk_checkpoints(video_id: str) -> None:
+        """Clears chunk checkpoints when re-running clean from scratch."""
+        conn = get_db_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM transcript_chunks WHERE video_id = ?", (video_id,))
         finally:
             conn.close()
 
     @staticmethod
     def get_topics(video_id: str) -> List[Dict[str, Any]]:
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                supa_topics = SupabaseDbService.get_topics(video_id)
+                if supa_topics:
+                    return supa_topics
+            except Exception as e:
+                print(f"Warning: Supabase get_topics error: {e}")
+
         conn = get_db_connection()
         rows = conn.execute("SELECT * FROM topics WHERE video_id = ? ORDER BY importance_score DESC", (video_id,)).fetchall()
         conn.close()
@@ -432,8 +615,24 @@ class DatabaseService:
         conn.commit()
         conn.close()
 
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                SupabaseDbService.save_clips(video_id=video_id, clips=clips)
+            except Exception as e:
+                print(f"Warning: Supabase save_clips error: {e}")
+
     @staticmethod
     def get_clips(video_id: str) -> List[Dict[str, Any]]:
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                supa_clips = SupabaseDbService.get_clips(video_id)
+                if supa_clips:
+                    return supa_clips
+            except Exception as e:
+                print(f"Warning: Supabase get_clips error: {e}")
+
         conn = get_db_connection()
         rows = conn.execute("SELECT * FROM clips WHERE video_id = ? ORDER BY clip_index ASC", (video_id,)).fetchall()
         conn.close()
@@ -451,27 +650,101 @@ class DatabaseService:
         return results
 
     @staticmethod
-    def set_job(job_id: str, video_id: str, job_type: str, status: str, progress: int, stage: str, message: str, result: Any = None, error: str = None):
+    def set_job(
+        job_id: str,
+        video_id: str,
+        job_type: str,
+        status: str,
+        progress: int,
+        stage: str,
+        message: str,
+        result: Any = None,
+        error: str = None,
+        chunks_completed: int = 0,
+        chunks_total: int = 0,
+        elapsed_seconds: float = 0.0,
+        retries: int = 0,
+        user_id: Optional[str] = None
+    ):
         conn = get_db_connection()
         now = time.time()
-        res_json = json.dumps(result) if result else None
+
+        # If user_id is not passed, attempt to inherit from the parent video record
+        resolved_user_id = user_id
+        if not resolved_user_id:
+            try:
+                v_row = conn.execute("SELECT user_id FROM videos WHERE id = ?", (video_id,)).fetchone()
+                if v_row and v_row["user_id"]:
+                    resolved_user_id = v_row["user_id"]
+            except Exception:
+                pass
+
+        res_data = result if isinstance(result, dict) else ({"data": result} if result is not None else {})
+        res_data["chunks_completed"] = chunks_completed
+        res_data["chunks_total"] = chunks_total
+        res_data["elapsed_seconds"] = round(elapsed_seconds, 1)
+        res_data["retries"] = retries
+        res_data["stage"] = stage
+        res_json = json.dumps(res_data)
+
         conn.execute("""
-            INSERT OR REPLACE INTO analysis_jobs (id, video_id, job_type, status, progress, current_stage, message, result_json, error, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM analysis_jobs WHERE id = ?), ?), ?)
-        """, (job_id, video_id, job_type, status, progress, stage, message, res_json, error, job_id, now, now))
+            INSERT OR REPLACE INTO analysis_jobs (id, video_id, user_id, job_type, status, progress, current_stage, message, result_json, error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM analysis_jobs WHERE id = ?), ?), ?)
+        """, (job_id, video_id, resolved_user_id, job_type, status, progress, stage, message, res_json, error, job_id, now, now))
         conn.commit()
         conn.close()
 
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                SupabaseDbService.set_job(
+                    job_id=job_id,
+                    video_id=video_id,
+                    job_type=job_type,
+                    status=status,
+                    progress=progress,
+                    stage=stage,
+                    message=message,
+                    result=res_data,
+                    error=error,
+                    user_id=resolved_user_id
+                )
+            except Exception as e:
+                print(f"Warning: Supabase set_job error: {e}")
+
     @staticmethod
     def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                supa_job = SupabaseDbService.get_job(job_id)
+                if supa_job:
+                    return supa_job
+            except Exception as e:
+                print(f"Warning: Supabase get_job error: {e}")
+
         conn = get_db_connection()
         row = conn.execute("SELECT * FROM analysis_jobs WHERE id = ?", (job_id,)).fetchone()
         conn.close()
         if not row:
             return None
         d = dict(row)
+        d["stage"] = d.get("current_stage", "")
+        d["chunks_completed"] = 0
+        d["chunks_total"] = 0
+        d["elapsed_seconds"] = 0.0
+        d["retries"] = 0
         if d["result_json"]:
-            d["result"] = json.loads(d["result_json"])
+            try:
+                res = json.loads(d["result_json"])
+                d["result"] = res
+                if isinstance(res, dict):
+                    d["chunks_completed"] = res.get("chunks_completed", 0)
+                    d["chunks_total"] = res.get("chunks_total", 0)
+                    d["elapsed_seconds"] = res.get("elapsed_seconds", 0.0)
+                    d["retries"] = res.get("retries", 0)
+            except Exception:
+                d["result"] = d["result_json"]
         return d
 
     # -------------------------------------------------------------
@@ -626,9 +899,96 @@ class DatabaseService:
 
     @staticmethod
     def get_user_videos(user_id: str) -> List[Dict[str, Any]]:
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                supa_vids = SupabaseDbService.get_user_videos(user_id)
+                if supa_vids:
+                    return supa_vids
+            except Exception as e:
+                print(f"Warning: Supabase get_user_videos error: {e}")
+
         conn = get_db_connection()
         rows = conn.execute("""
             SELECT * FROM videos WHERE user_id = ? ORDER BY created_at DESC
         """, (user_id,)).fetchall()
         conn.close()
         return [dict(r) for r in rows]
+
+    @staticmethod
+    def save_clip_selection(user_id: str, video_id: str, clip_id: str, position: int, selected: bool = True) -> Dict[str, Any]:
+        """Persists user clip selection and playlist ordering."""
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                return SupabaseDbService.save_clip_selection(user_id, video_id, clip_id, position, selected)
+            except Exception as e:
+                print(f"Warning: Supabase save_clip_selection error: {e}")
+        return {"user_id": user_id, "video_id": video_id, "clip_id": clip_id, "position": position, "selected": selected}
+
+    @staticmethod
+    def get_clip_selections(user_id: str, video_id: str) -> List[Dict[str, Any]]:
+        """Retrieves user clip selections and playlist ordering."""
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                return SupabaseDbService.get_clip_selections(user_id, video_id)
+            except Exception as e:
+                print(f"Warning: Supabase get_clip_selections error: {e}")
+        return []
+
+    @staticmethod
+    def claim_video_ownership(video_id: str, user_id: str) -> bool:
+        """Associates an unowned legacy video record with the authenticated user."""
+        conn = get_db_connection()
+        conn.execute("UPDATE videos SET user_id = ? WHERE id = ? AND (user_id IS NULL OR user_id = '')", (user_id, video_id))
+        conn.execute("UPDATE analysis_jobs SET user_id = ? WHERE video_id = ? AND (user_id IS NULL OR user_id = '')", (user_id, video_id))
+        conn.commit()
+        conn.close()
+
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                SupabaseDbService.claim_video_ownership(video_id, user_id)
+            except Exception as e:
+                print(f"Warning: Supabase claim_video_ownership error: {e}")
+        return True
+
+    @staticmethod
+    def delete_video(video_id: str, user_id: Optional[str] = None) -> bool:
+        """Deletes video and all associated local records and files."""
+        conn = get_db_connection()
+        # Find local file paths before deleting records
+        vid_row = conn.execute("SELECT filepath, audio_path FROM videos WHERE id = ?", (video_id,)).fetchone()
+        local_vpath = vid_row["filepath"] if vid_row and vid_row["filepath"] else None
+        local_apath = vid_row["audio_path"] if vid_row and vid_row["audio_path"] else None
+
+        conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+        conn.execute("DELETE FROM transcript_segments WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM topics WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM clips WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM analysis_jobs WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM transcript_chunks WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM user_queries WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM saved_clips WHERE video_id = ?", (video_id,))
+        conn.commit()
+        conn.close()
+
+        # Delete local media files if present
+        try:
+            if local_vpath and Path(local_vpath).exists():
+                Path(local_vpath).unlink(missing_ok=True)
+            if local_apath and Path(local_apath).exists():
+                Path(local_apath).unlink(missing_ok=True)
+        except Exception as f_err:
+            print(f"Warning deleting local files for {video_id}: {f_err}")
+
+        # Supabase deletion
+        if is_supabase_configured():
+            try:
+                from backend.services.supabase_service import SupabaseDbService
+                SupabaseDbService.delete_video(video_id=video_id, user_id=user_id)
+            except Exception as e:
+                print(f"Warning: Supabase delete_video error: {e}")
+        return True
+

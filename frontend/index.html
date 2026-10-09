@@ -551,83 +551,232 @@
     </div>
   </div>
 
-  <!-- AUTHENTICATION MODAL (Phone OTP & Google Sign-In) -->
+  <!-- AUTHENTICATION MODAL (Supabase Email/Password & Google OAuth) -->
   <div class="modal-backdrop hidden" id="authModal">
     <div class="modal-box auth-modal-box">
       <div class="modal-header">
         <div class="auth-header-title">
           <div class="brand-icon-sm"><i class="fa-solid fa-atom"></i></div>
           <div>
-            <h3>Welcome to Vidara</h3>
-            <p class="modal-subtitle">Sign in to save your clips permanently and access your personal video library.</p>
+            <h3 id="authModalTitle">Welcome to Vidara</h3>
+            <p class="modal-subtitle" id="authModalSubtitle">Sign in to save your clips and access your personal video library.</p>
           </div>
         </div>
-        <button id="closeAuthModalBtn" class="modal-close">&times;</button>
+        <button id="closeAuthModalBtn" class="modal-close" aria-label="Close dialog">&times;</button>
       </div>
 
       <div class="modal-body">
-        <!-- Auth Method Tabs -->
-        <div class="auth-tabs">
-          <button type="button" class="auth-tab active" id="tabAuthPhone">
-            <i class="fa-solid fa-mobile-screen"></i> Phone Number + OTP
-          </button>
-          <button type="button" class="auth-tab" id="tabAuthGoogle">
-            <i class="fa-brands fa-google"></i> Google Account
-          </button>
-        </div>
+        <!-- VIEW 1: LOGIN -->
+        <div class="auth-view" id="viewAuthLogin">
+          <div class="auth-alert hidden" id="loginAlert"></div>
 
-        <!-- Panel 1: Phone OTP -->
-        <div class="auth-panel" id="panelAuthPhone">
-          <div class="form-group">
-            <label for="authNameInput"><i class="fa-solid fa-user"></i> Your Full Name</label>
-            <input type="text" id="authNameInput" placeholder="e.g. Alex Johnson" class="form-input" autocomplete="name" />
-          </div>
-
-          <div class="form-group">
-            <label for="authPhoneInput"><i class="fa-solid fa-phone"></i> Mobile Number</label>
-            <div class="phone-input-wrap">
-              <span class="phone-prefix"><i class="fa-solid fa-globe"></i></span>
-              <input type="tel" id="authPhoneInput" placeholder="+91 9876543210 (include country code)" class="form-input" autocomplete="tel" />
-              <button type="button" id="sendOtpBtn" class="btn-action btn-sm">
-                <i class="fa-solid fa-paper-plane"></i> Send OTP
-              </button>
-            </div>
-            <span class="input-hint">A 6-digit one-time verification code will be sent to your number.</span>
-          </div>
-
-          <!-- OTP Input Section (Toggled after sending OTP) -->
-          <div class="otp-section hidden" id="otpSection">
-            <div class="otp-dev-banner" id="otpDevBanner">
-              <i class="fa-solid fa-key icon-accent"></i>
-              <span>Verification code: <strong id="devOtpBadge">------</strong> <small>(valid for 5 mins)</small></span>
+          <form id="loginForm" novalidate>
+            <div class="form-group">
+              <label for="loginEmail"><i class="fa-solid fa-envelope"></i> Email Address</label>
+              <input type="email" id="loginEmail" placeholder="you@example.com" class="form-input" autocomplete="email" required />
             </div>
 
             <div class="form-group">
-              <label for="authOtpInput"><i class="fa-solid fa-shield-halved"></i> Enter 6-Digit Code</label>
-              <input type="text" id="authOtpInput" placeholder="● ● ● ● ● ●" maxlength="6" class="form-input otp-code-input" autocomplete="one-time-code" />
+              <label for="loginPassword"><i class="fa-solid fa-lock"></i> Password</label>
+              <div class="password-input-wrap">
+                <input type="password" id="loginPassword" placeholder="••••••••" class="form-input" autocomplete="current-password" required />
+                <button type="button" class="btn-pwd-toggle" id="toggleLoginPassword" aria-label="Show password" tabindex="-1">
+                  <i class="fa-regular fa-eye"></i>
+                </button>
+              </div>
             </div>
 
-            <button type="button" id="verifyOtpBtn" class="btn-primary btn-block">
-              <i class="fa-solid fa-circle-check"></i> Verify & Enter Vidara
+            <div class="auth-options-row">
+              <label class="remember-label">
+                <input type="checkbox" id="loginRememberMe" checked />
+                <span>Remember me</span>
+              </label>
+              <a href="#" id="linkForgotPassword" class="auth-link">Forgot password?</a>
+            </div>
+
+            <button type="submit" id="loginSubmitBtn" class="btn-primary btn-block">
+              <i class="fa-solid fa-arrow-right-to-bracket"></i> Sign In
             </button>
+          </form>
+
+          <div class="auth-divider">
+            <span>or continue with</span>
+          </div>
+
+          <button type="button" id="googleLoginBtn" class="btn-google-sign">
+            <svg class="google-svg" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+            </svg>
+            <span>Continue with Google</span>
+          </button>
+
+          <div class="auth-switch-text">
+            Don't have an account? <a href="#" id="linkToSignUp" class="auth-link-bold">Sign up</a>
           </div>
         </div>
 
-        <!-- Panel 2: Google Sign-In -->
-        <div class="auth-panel hidden" id="panelAuthGoogle">
-          <p class="google-auth-intro">
-            Connect securely with your Google account. Your profile name and Google avatar will be automatically linked to your personal clip library.
+        <!-- VIEW 2: SIGN UP -->
+        <div class="auth-view hidden" id="viewAuthSignup">
+          <div class="auth-alert hidden" id="signupAlert"></div>
+
+          <form id="signupForm" novalidate>
+            <div class="form-group">
+              <label for="signupUsername"><i class="fa-solid fa-user"></i> Username</label>
+              <input type="text" id="signupUsername" placeholder="e.g. alex_creator" class="form-input" autocomplete="username" required />
+              <span class="input-hint">3–30 characters (letters, numbers, underscores)</span>
+            </div>
+
+            <div class="form-group">
+              <label for="signupEmail"><i class="fa-solid fa-envelope"></i> Email Address</label>
+              <input type="email" id="signupEmail" placeholder="you@example.com" class="form-input" autocomplete="email" required />
+            </div>
+
+            <div class="form-group">
+              <label for="signupPassword"><i class="fa-solid fa-lock"></i> Password</label>
+              <div class="password-input-wrap">
+                <input type="password" id="signupPassword" placeholder="At least 8 characters" class="form-input" autocomplete="new-password" required />
+                <button type="button" class="btn-pwd-toggle" id="toggleSignupPassword" aria-label="Show password" tabindex="-1">
+                  <i class="fa-regular fa-eye"></i>
+                </button>
+              </div>
+              <span class="input-hint">Min 8 characters with at least one letter and one number</span>
+            </div>
+
+            <div class="form-group">
+              <label for="signupConfirmPassword"><i class="fa-solid fa-shield-halved"></i> Confirm Password</label>
+              <div class="password-input-wrap">
+                <input type="password" id="signupConfirmPassword" placeholder="Confirm your password" class="form-input" autocomplete="new-password" required />
+                <button type="button" class="btn-pwd-toggle" id="toggleSignupConfirmPassword" aria-label="Show password" tabindex="-1">
+                  <i class="fa-regular fa-eye"></i>
+                </button>
+              </div>
+            </div>
+
+            <button type="submit" id="signupSubmitBtn" class="btn-primary btn-block">
+              <i class="fa-solid fa-user-plus"></i> Create Account
+            </button>
+          </form>
+
+          <div class="auth-divider">
+            <span>or continue with</span>
+          </div>
+
+          <button type="button" id="googleSignupBtn" class="btn-google-sign">
+            <svg class="google-svg" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+            </svg>
+            <span>Continue with Google</span>
+          </button>
+
+          <div class="auth-switch-text">
+            Already have an account? <a href="#" id="linkToLogin" class="auth-link-bold">Sign in</a>
+          </div>
+        </div>
+
+        <!-- VIEW 3: FORGOT PASSWORD -->
+        <div class="auth-view hidden" id="viewAuthForgot">
+          <div class="auth-alert hidden" id="forgotAlert"></div>
+
+          <p class="auth-view-instruction">
+            Enter the email address registered with your Vidara account and we'll send you a secure recovery link.
           </p>
 
-          <div class="google-auth-box">
-            <!-- Official Google Identity Services button mount -->
-            <div id="googleGsiContainer" style="display: flex; justify-content: center; margin: 15px 0;"></div>
+          <form id="forgotForm" novalidate>
+            <div class="form-group">
+              <label for="forgotEmail"><i class="fa-solid fa-envelope"></i> Account Email</label>
+              <input type="email" id="forgotEmail" placeholder="you@example.com" class="form-input" autocomplete="email" required />
+            </div>
 
-            <!-- Instant Google Sign-In Fallback Button -->
-            <button type="button" id="directGoogleLoginBtn" class="btn-google-sign">
-              <i class="fa-brands fa-google text-red"></i>
-              <span>Continue with Google Account</span>
+            <button type="submit" id="forgotSubmitBtn" class="btn-primary btn-block">
+              <i class="fa-solid fa-paper-plane"></i> Send Password Reset Link
             </button>
+          </form>
+
+          <div class="auth-switch-text">
+            <a href="#" id="linkBackToLoginFromForgot" class="auth-back-link">
+              <i class="fa-solid fa-arrow-left"></i> Back to Sign In
+            </a>
+          </div>
+        </div>
+
+        <!-- VIEW 4: PASSWORD RESET -->
+        <div class="auth-view hidden" id="viewAuthReset">
+          <div class="auth-alert hidden" id="resetAlert"></div>
+
+          <p class="auth-view-instruction">
+            Enter your new password below. Make sure it is at least 8 characters long with letters and numbers.
+          </p>
+
+          <form id="resetForm" novalidate>
+            <div class="form-group">
+              <label for="resetNewPassword"><i class="fa-solid fa-lock"></i> New Password</label>
+              <div class="password-input-wrap">
+                <input type="password" id="resetNewPassword" placeholder="New secure password" class="form-input" autocomplete="new-password" required />
+                <button type="button" class="btn-pwd-toggle" id="toggleResetNewPassword" aria-label="Show password" tabindex="-1">
+                  <i class="fa-regular fa-eye"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="resetConfirmPassword"><i class="fa-solid fa-shield-halved"></i> Confirm New Password</label>
+              <div class="password-input-wrap">
+                <input type="password" id="resetConfirmPassword" placeholder="Repeat new password" class="form-input" autocomplete="new-password" required />
+                <button type="button" class="btn-pwd-toggle" id="toggleResetConfirmPassword" aria-label="Show password" tabindex="-1">
+                  <i class="fa-regular fa-eye"></i>
+                </button>
+              </div>
+            </div>
+
+            <button type="submit" id="resetSubmitBtn" class="btn-primary btn-block">
+              <i class="fa-solid fa-key"></i> Update Password
+            </button>
+          </form>
+
+          <div class="auth-switch-text">
+            <a href="#" id="linkBackToLoginFromReset" class="auth-back-link">
+              <i class="fa-solid fa-arrow-left"></i> Cancel & Back to Sign In
+            </a>
+          </div>
+        </div>
+
+        <!-- VIEW 5: VERIFICATION PENDING -->
+        <div class="auth-view hidden" id="viewAuthVerifyPending">
+          <div class="verify-pending-card">
+            <div class="verify-icon-orb">
+              <i class="fa-solid fa-envelope-open-text"></i>
+            </div>
+            <h4>Check Your Email</h4>
+            <p class="verify-text">
+              We've sent a verification link to <strong id="verifyPendingEmailBadge">your email</strong>.
+              Please click the link in that email to confirm your account and start discovering moments.
+            </p>
+            <button type="button" id="resendVerificationBtn" class="btn-ghost btn-block">
+              <i class="fa-solid fa-arrow-rotate-right"></i> Resend Verification Email
+            </button>
+          </div>
+
+          <div class="auth-switch-text">
+            <a href="#" id="linkBackToLoginFromVerify" class="auth-back-link">
+              <i class="fa-solid fa-arrow-left"></i> Back to Sign In
+            </a>
+          </div>
+        </div>
+
+        <!-- VIEW 6: AUTH CALLBACK / LOADING -->
+        <div class="auth-view hidden" id="viewAuthCallback">
+          <div class="callback-card">
+            <div class="callback-spinner">
+              <i class="fa-solid fa-circle-notch fa-spin"></i>
+            </div>
+            <h4>Authenticating...</h4>
+            <p class="callback-subtitle" id="callbackStatusText">Verifying credentials and synchronizing your workspace...</p>
           </div>
         </div>
       </div>

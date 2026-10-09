@@ -106,11 +106,23 @@ def set_groq_api_key(key: str, stt_key: str = "", llm_key: str = ""):
     with open(env_file, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
 
-# Models
 GROQ_API_KEY = get_groq_api_key()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "qwen/qwen3.8-27b")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.3-70b-versatile")
 GROQ_WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3")
+
+# Performance Optimization Settings
+TRANSCRIPTION_MODE = os.getenv("TRANSCRIPTION_MODE", "FAST").upper()  # FAST or PRECISE
+GROQ_WHISPER_FAST_MODEL = os.getenv("GROQ_WHISPER_FAST_MODEL", "whisper-large-v3-turbo")
+GROQ_WHISPER_PRECISE_MODEL = os.getenv("GROQ_WHISPER_PRECISE_MODEL", "whisper-large-v3")
+TRANSCRIPTION_CHUNK_SECONDS = float(os.getenv("TRANSCRIPTION_CHUNK_SECONDS", "300.0"))
+TRANSCRIPTION_OVERLAP_SECONDS = float(os.getenv("TRANSCRIPTION_OVERLAP_SECONDS", "2.0"))
+TRANSCRIPTION_MAX_CONCURRENCY = int(os.getenv("TRANSCRIPTION_MAX_CONCURRENCY", "2"))
+TRANSCRIPTION_MAX_RETRIES = int(os.getenv("TRANSCRIPTION_MAX_RETRIES", "3"))
+TRANSCRIPTION_TIMEOUT_SECONDS = float(os.getenv("TRANSCRIPTION_TIMEOUT_SECONDS", "60.0"))
+
+DIARIZATION_MODE = os.getenv("DIARIZATION_MODE", "FAST").upper()  # FAST, STANDARD, PRECISE
+REASONING_TIMEOUT_SECONDS = float(os.getenv("REASONING_TIMEOUT_SECONDS", "25.0"))
 
 AGNES_API_KEY = os.getenv("AGNES_API_KEY", "")
 AGNES_BASE_URL = os.getenv("AGNES_BASE_URL", "https://platform.agnes-ai.com/v1")
@@ -147,4 +159,30 @@ def get_ffmpeg_executable() -> str:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         return "ffmpeg"
+
+
+# ====================================================
+# SUPABASE CONFIGURATION & STORAGE BUCKETS
+# ====================================================
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_ANON_KEY = (os.getenv("SUPABASE_ANON_KEY", "") or os.getenv("SUPABASE_KEY", "")).strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "").strip() or os.getenv("DATABASE_URL", "").strip()
+
+# Storage bucket names (private buckets)
+SUPABASE_STORAGE_BUCKET_VIDEOS = os.getenv("SUPABASE_STORAGE_BUCKET_VIDEOS", "original-videos")
+SUPABASE_STORAGE_BUCKET_AUDIO = os.getenv("SUPABASE_STORAGE_BUCKET_AUDIO", "processed-audio")
+SUPABASE_STORAGE_BUCKET_CLIPS = os.getenv("SUPABASE_STORAGE_BUCKET_CLIPS", "generated-clips")
+SUPABASE_STORAGE_BUCKET_SUBTITLES = os.getenv("SUPABASE_STORAGE_BUCKET_SUBTITLES", "subtitles")
+SUPABASE_STORAGE_BUCKET_EXPORTS = os.getenv("SUPABASE_STORAGE_BUCKET_EXPORTS", "final-exports")
+
+def is_supabase_configured() -> bool:
+    """Returns True if Supabase credentials are configured."""
+    url = os.getenv("SUPABASE_URL", "") or SUPABASE_URL
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "") or os.getenv("SUPABASE_KEY", "") or SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
+    return bool(url and key)
+
+def get_supabase_key() -> str:
+    """Returns the most privileged available key for server-side persistence operations."""
+    return os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or SUPABASE_SERVICE_ROLE_KEY or os.getenv("SUPABASE_ANON_KEY", "") or SUPABASE_ANON_KEY or os.getenv("SUPABASE_KEY", "")
 

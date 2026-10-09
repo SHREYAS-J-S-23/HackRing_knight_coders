@@ -23,6 +23,8 @@ class EnrichedTranscript(BaseModel):
     duration_seconds: float
     language: Optional[str] = "en"
     segments: List[TranscriptSegment]
+    transcription_time_seconds: Optional[float] = None
+    diarization_time_seconds: Optional[float] = None
 
 class SegmentAnnotation(BaseModel):
     segment_id: int
