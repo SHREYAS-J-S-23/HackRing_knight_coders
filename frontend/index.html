@@ -253,7 +253,7 @@
           <div class="ask-input-box">
             <div class="ask-input-wrapper">
               <i class="fa-solid fa-magnifying-glass search-icon"></i>
-              <input type="text" id="queryTextInput" class="form-input ask-input" placeholder="e.g. Find where the speaker explains assets vs liabilities, or key advice..." autocomplete="off" value="" />
+              <input type="text" id="queryTextInput" name="search_query_prompt" class="form-input ask-input" placeholder="e.g. Find where the speaker explains assets vs liabilities, or key advice..." autocomplete="new-password" data-lpignore="true" data-form-type="other" spellcheck="false" autocorrect="off" autocapitalize="off" value="" />
               <button type="button" id="voiceQueryBtn" class="btn-mic" title="Ask by Voice">
                 <i class="fa-solid fa-microphone"></i>
               </button>
@@ -580,7 +580,7 @@
         <div class="auth-panel" id="panelAuthPhone">
           <div class="form-group">
             <label for="authNameInput"><i class="fa-solid fa-user"></i> Your Full Name</label>
-            <input type="text" id="authNameInput" placeholder="e.g. Vishnu Karanth" class="form-input" autocomplete="name" />
+            <input type="text" id="authNameInput" placeholder="e.g. Alex Johnson" class="form-input" autocomplete="name" />
           </div>
 
           <div class="form-group">

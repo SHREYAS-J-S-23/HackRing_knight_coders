@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -323,24 +324,54 @@ class VideoCutter:
             vtt_filename = f"{video_id}_{clean_tid}.vtt"
             vtt_path = OUTPUT_DIR / vtt_filename
 
-            cmd = [
+            # Fast & high-quality cutting strategy:
+            # 1. Attempt instantaneous stream-copy (-c copy) first (takes ~0.1s, 100% original crystal-clear quality)
+            # 2. Fall back to crisp high-fidelity re-encoding (veryfast + CRF 19) if copy cannot seek cleanly
+            rendered = False
+
+            copy_cmd = [
                 ffmpeg_bin,
                 "-y",
-                "-threads", "0",
                 "-ss", f"{start_t:.3f}",
                 "-i", str(input_video_path),
                 "-t", f"{duration:.3f}",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "22",
-                "-c:a", "aac",
-                "-b:a", "128k",
+                "-c", "copy",
                 "-avoid_negative_ts", "make_zero",
                 "-movflags", "+faststart",
                 str(clip_path)
             ]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if res.returncode == 0 and clip_path.exists():
+            res = subprocess.run(copy_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode == 0 and clip_path.exists() and clip_path.stat().st_size > 5000:
+                try:
+                    probe_dur = cls.get_video_duration(clip_path)
+                    if probe_dur >= max(0.4, duration * 0.4):
+                        rendered = True
+                except Exception:
+                    rendered = True
+
+            if not rendered:
+                encode_cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-threads", "4",
+                    "-ss", f"{start_t:.3f}",
+                    "-i", str(input_video_path),
+                    "-t", f"{duration:.3f}",
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "19",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-avoid_negative_ts", "make_zero",
+                    "-movflags", "+faststart",
+                    str(clip_path)
+                ]
+                res = subprocess.run(encode_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if res.returncode == 0 and clip_path.exists():
+                    rendered = True
+
+            if rendered and clip_path.exists():
                 # Probe actual rendered file duration from disk
                 try:
                     actual_dur = cls.get_video_duration(clip_path)
@@ -389,7 +420,7 @@ class VideoCutter:
                 return None
 
         # Execute all clip cuts in parallel across available CPU cores
-        max_workers = min(4, len(valid_topics)) if valid_topics else 1
+        max_workers = min(os.cpu_count() or 4, 8) if valid_topics else 1
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             results = list(executor.map(cut_single_topic, enumerate(valid_topics)))
 

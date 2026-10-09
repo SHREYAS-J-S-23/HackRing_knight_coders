@@ -159,9 +159,23 @@ document.addEventListener('DOMContentLoaded', () => {
   const clipsGrid = document.getElementById('clipsGrid');
   const mergeClipsActionBtn = document.getElementById('mergeClipsActionBtn');
 
-  // Reset query search bar so no cached value persists
+  // Reset and purge any browser autofill on query search bar
+  function purgeAutofill() {
+    if (queryTextInput) {
+      const val = (queryTextInput.value || '').trim();
+      if (val.includes('@') || val.toLowerCase().includes('karanth') || val.toLowerCase().includes('vishnu')) {
+        queryTextInput.value = '';
+      }
+    }
+  }
+
   if (queryTextInput) {
     queryTextInput.value = '';
+    queryTextInput.addEventListener('focus', purgeAutofill);
+    queryTextInput.addEventListener('input', purgeAutofill);
+    setTimeout(purgeAutofill, 50);
+    setTimeout(purgeAutofill, 300);
+    setTimeout(purgeAutofill, 1000);
   }
 
   async function parseErrorResponse(res, defaultMsg) {
