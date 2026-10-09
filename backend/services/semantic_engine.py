@@ -380,7 +380,7 @@ Return STRICTLY a JSON object matching this schema:
   ]
 }}
 """
-        candidate_models = [primary_model, fallback_model, "openai/gpt-oss-20b"]
+        candidate_models = [primary_model, fallback_model, "qwen/qwen3.8-27b"]
         data = self._call_llm_json(
             client=client,
             prompt=prompt,
@@ -524,7 +524,7 @@ Return STRICTLY a JSON object with this format:
   ]
 }}
 """
-        candidate_models = [model, fallback_model, "openai/gpt-oss-20b"]
+        candidate_models = [model, fallback_model, "qwen/qwen3.8-27b"]
         data = self._call_llm_json(
             client=client,
             prompt=prompt,

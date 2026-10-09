@@ -345,8 +345,8 @@ Return STRICT JSON matching this schema:
         models_to_try = [primary_model]
         if self.fallback_model and self.fallback_model not in models_to_try:
             models_to_try.append(self.fallback_model)
-        if "openai/gpt-oss-20b" not in models_to_try:
-            models_to_try.append("openai/gpt-oss-20b")
+        if "qwen/qwen3.8-27b" not in models_to_try:
+            models_to_try.append("qwen/qwen3.8-27b")
 
         for m in models_to_try:
             try:
