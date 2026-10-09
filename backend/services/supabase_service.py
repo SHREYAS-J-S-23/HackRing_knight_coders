@@ -131,6 +131,13 @@ class SupabaseStorageService:
             print(f"Error: Local file {local_path} does not exist for upload.")
             return None
 
+        # Supabase Storage standard tier limits individual uploads to 50MB.
+        # Files larger than 50MB should be retained locally on disk to avoid hanging or 413 errors.
+        file_size = local_path.stat().st_size
+        if file_size > 50 * 1024 * 1024:
+            print(f"Info: Skipping Supabase storage upload for {local_path.name} ({round(file_size / (1024*1024), 1)}MB > 50MB limit). Stored locally on disk.")
+            return None
+
         try:
             with open(local_path, "rb") as f:
                 file_bytes = f.read()

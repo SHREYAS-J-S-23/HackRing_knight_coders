@@ -122,9 +122,36 @@ def get_session_data(video_id: str, user_id: Optional[str] = None) -> Dict[str, 
     return session
 
 
+def _async_sync_to_supabase_storage(
+    video_id: str,
+    user_id: Optional[str],
+    video_path: Optional[Path],
+    audio_path: Optional[Path],
+    ext: str = ".mp4"
+) -> None:
+    """Non-blocking background helper to sync media to Supabase storage without delaying UI."""
+    if not is_supabase_configured():
+        return
+    try:
+        from backend.services.supabase_service import SupabaseStorageService, to_uuid
+        u_prefix = to_uuid(user_id) if user_id else "anonymous"
+        v_uuid = to_uuid(video_id)
+
+        # Audio is always compact (16kHz mono, 32kbps) and fast to upload
+        if audio_path and Path(audio_path).exists():
+            SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_AUDIO, audio_path, f"{u_prefix}/{v_uuid}/audio.mp3", "audio/mpeg")
+
+        # Video is uploaded if within single-file limit
+        if video_path and Path(video_path).exists():
+            SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_VIDEOS, video_path, f"{u_prefix}/{v_uuid}/original{ext}", "video/mp4")
+    except Exception as supa_err:
+        print(f"Notice: Background Supabase storage sync for {video_id}: {supa_err}")
+
+
 @router.post("/upload")
 @router.post("/videos/upload")
 async def upload_video(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...), 
     groq_api_key: Optional[str] = Form(None),
     current_user: Dict[str, Any] = Depends(get_current_user)
@@ -160,22 +187,7 @@ async def upload_video(
 
         user_id = current_user["id"] if current_user else None
 
-        # Upload to Supabase Storage if configured
-        storage_path = None
-        if is_supabase_configured():
-            try:
-                from backend.services.supabase_service import SupabaseStorageService, to_uuid
-                u_prefix = to_uuid(user_id) if user_id else "anonymous"
-                v_uuid = to_uuid(video_id)
-                storage_dest = f"{u_prefix}/{v_uuid}/original{ext}"
-                SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_VIDEOS, saved_video_path, storage_dest, "video/mp4")
-                if audio_path and Path(audio_path).exists():
-                    SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_AUDIO, audio_path, f"{u_prefix}/{v_uuid}/audio.mp3", "audio/mpeg")
-                storage_path = storage_dest
-            except Exception as supa_err:
-                print(f"Warning: Supabase upload on upload_video failed: {supa_err}")
-
-        # Save to database
+        # Save to database immediately
         DatabaseService.save_video(
             video_id=video_id,
             filename=file.filename,
@@ -193,7 +205,8 @@ async def upload_video(
             status="completed",
             progress=20,
             stage="Audio Extracted",
-            message=f"Uploaded {file.filename} ({round(duration, 1)}s). Ready for intelligence analysis."
+            message=f"Uploaded {file.filename} ({round(duration, 1)}s). Ready for intelligence analysis.",
+            user_id=user_id
         )
 
         VIDEO_CACHE[video_id] = {
@@ -206,6 +219,16 @@ async def upload_video(
             "topics": [],
             "clips": []
         }
+
+        # Offload cloud storage sync to background task so the frontend is unblocked instantly
+        background_tasks.add_task(
+            _async_sync_to_supabase_storage,
+            video_id=video_id,
+            user_id=user_id,
+            video_path=saved_video_path,
+            audio_path=audio_path,
+            ext=ext
+        )
 
         return {
             "status": "success",
@@ -233,6 +256,7 @@ async def upload_video(
 @router.post("/videos/ingest-url")
 async def ingest_video_url(
     req: IngestUrlRequest,
+    background_tasks: BackgroundTasks,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
@@ -261,18 +285,6 @@ async def ingest_video_url(
         duration = res["duration_seconds"]
         filesize = res["filesize"]
 
-        if is_supabase_configured():
-            try:
-                from backend.services.supabase_service import SupabaseStorageService, to_uuid
-                u_prefix = to_uuid(user_id)
-                v_uuid = to_uuid(video_id)
-                ext = Path(filename).suffix or ".mp4"
-                SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_VIDEOS, res["filepath"], f"{u_prefix}/{v_uuid}/original{ext}", "video/mp4")
-                if res.get("audio_path") and Path(res["audio_path"]).exists():
-                    SupabaseStorageService.upload_file(SUPABASE_STORAGE_BUCKET_AUDIO, res["audio_path"], f"{u_prefix}/{v_uuid}/audio.mp3", "audio/mpeg")
-            except Exception as supa_err:
-                print(f"Warning: Supabase upload on ingest_link failed: {supa_err}")
-
         DatabaseService.set_job(
             job_id=f"job_{video_id}",
             video_id=video_id,
@@ -282,6 +294,16 @@ async def ingest_video_url(
             stage="Audio Extracted",
             message=f"Imported from link: {filename} ({round(duration, 1)}s). Ready for intelligence analysis.",
             user_id=user_id
+        )
+
+        ext = Path(filename).suffix or ".mp4"
+        background_tasks.add_task(
+            _async_sync_to_supabase_storage,
+            video_id=video_id,
+            user_id=user_id,
+            video_path=Path(res["filepath"]) if res.get("filepath") else None,
+            audio_path=Path(res["audio_path"]) if res.get("audio_path") else None,
+            ext=ext
         )
 
         VIDEO_CACHE[video_id] = {
