@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vidara — AI Video Intelligence Platform</title>
+  <meta name="description" content="Understand Every Moment. AI-powered long-form video intelligence with autonomous topic discovery, voice/text semantic retrieval, and verified deterministic clip assembly.">
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  
+  <link rel="stylesheet" href="css/style.css">
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body class="dark-theme">
+  <!-- Subtle Gradient Background Glows -->
+  <div class="glow-bg glow-1"></div>
+  <div class="glow-bg glow-2"></div>
+
+  <!-- Navigation Bar -->
+  <header class="navbar">
+    <div class="nav-container">
+      <div class="brand">
+        <div class="brand-icon">
+          <i class="fa-solid fa-atom"></i>
+          <span class="sparkle"><i class="fa-solid fa-sparkles"></i></span>
+        </div>
+        <div class="brand-text">
+          <h1>VIDARA</h1>
+          <span class="tagline">Understand Every Moment.</span>
+        </div>
+      </div>
+
+      <div class="nav-actions">
+        <div class="engine-pill" id="engineStatusPill">
+          <span class="pulse-dot"></span>
+          <span class="engine-name">Groq LPU (GPT-OSS 120B Flagship + Whisper Lg-v3)</span>
+        </div>
+
+        <!-- Personal Library Button -->
+        <button id="navLibraryBtn" class="btn-ghost nav-library-btn" title="View Saved Clips & Projects">
+          <i class="fa-solid fa-bookmark icon-accent"></i> My Library <span class="badge badge-accent badge-sm" id="navLibraryCountBadge">0</span>
+        </button>
+
+        <button id="configKeyBtn" class="btn-ghost" title="Configure API Credentials">
+          <i class="fa-solid fa-key"></i> Keys
+        </button>
+
+        <!-- User Authentication & Profile -->
+        <button id="authBtn" class="btn-primary btn-sm">
+          <i class="fa-solid fa-arrow-right-to-bracket"></i> Sign In
+        </button>
+
+        <div class="user-profile-pill hidden" id="userProfilePill">
+          <div class="user-avatar-mini" id="userAvatarMini">U</div>
+          <span class="user-name-label" id="userNameLabel">User</span>
+          <button id="logoutBtn" class="btn-icon-logout" title="Sign Out">
+            <i class="fa-solid fa-arrow-right-from-bracket"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="main-wrapper">
+    <!-- Hero / Headline -->
+    <div class="hero-banner">
+      <div class="hero-badge"><i class="fa-solid fa-brain-circuit"></i> AI VIDEO INTELLIGENCE PLATFORM</div>
+      <h2>Understand Long-Form Video. Instantly.</h2>
+      <p class="hero-subtitle">Upload 1–2hr+ podcasts, lectures, or interviews. Ask for any concept by voice or text, or let Vidara autonomously discover and rank the moments that matter.</p>
+    </div>
+
+    <!-- PIPELINE PROGRESS INDICATOR -->
+    <section class="pipeline-stepper" id="pipelineStepper" aria-label="Processing Steps">
+      <div class="step-card active" id="stepIndicator1">
+        <div class="step-number">1</div>
+        <div class="step-info">
+          <h4>Video Ingestion</h4>
+          <p>Extract & Whisper STT</p>
+        </div>
+      </div>
+      <div class="step-divider"></div>
+      <div class="step-card" id="stepIndicator2">
+        <div class="step-number">2</div>
+        <div class="step-info">
+          <h4>Semantic Index</h4>
+          <p>Topic Graph & Embeddings</p>
+        </div>
+      </div>
+      <div class="step-divider"></div>
+      <div class="step-card" id="stepIndicator3">
+        <div class="step-number">3</div>
+        <div class="step-info">
+          <h4>Intelligence Inference</h4>
+          <p>Ask or Discover Topics</p>
+        </div>
+      </div>
+      <div class="step-divider"></div>
+      <div class="step-card" id="stepIndicator4">
+        <div class="step-number">4</div>
+        <div class="step-info">
+          <h4>Deterministic Clips</h4>
+          <p>Verified Cuts & Merge</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 1: Upload / Input Section -->
+    <section class="card upload-section" id="uploadSection">
+      <div class="card-header">
+        <div class="header-title">
+          <i class="fa-solid fa-cloud-arrow-up icon-accent"></i>
+          <h2>Import Long-Form Video</h2>
+        </div>
+        <span class="badge badge-accent">File Upload • YouTube • Vimeo • Loom • Direct Links</span>
+      </div>
+
+      <div class="card-body">
+        <!-- Ingestion Mode Selector Tabs -->
+        <div class="ingest-tabs-bar">
+          <button type="button" class="ingest-tab active" id="tabUploadFile">
+            <i class="fa-solid fa-file-video"></i> Upload Local File
+          </button>
+          <button type="button" class="ingest-tab" id="tabUploadLink">
+            <i class="fa-solid fa-link"></i> Import via Video Link
+          </button>
+        </div>
+
+        <!-- Mode A: Local File Dropzone -->
+        <div class="ingest-panel" id="panelUploadFile">
+          <div class="dropzone" id="videoDropzone">
+            <input type="file" id="videoFileInput" accept="video/mp4,video/quicktime,video/webm,video/mkv" style="display: none;">
+            <div class="dropzone-content">
+              <div class="upload-icon-circle">
+                <i class="fa-solid fa-video"></i>
+              </div>
+              <h3>Drop your long-form video here, or <span class="highlight-link">browse</span></h3>
+              <p>Chunked upload & streaming ingestion • Zero RAM overload • MP4, MOV, WebM</p>
+              
+              <div class="dropzone-footer">
+                <button type="button" id="browseFileBtn" class="btn-primary">
+                  <i class="fa-solid fa-folder-open"></i> Select Video File
+                </button>
+                <button type="button" id="useSampleDemoBtn" class="btn-secondary">
+                  <i class="fa-solid fa-wand-magic-sparkles"></i> Use Founder Demo Video
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mode B: Link / URL Import Box -->
+        <div class="ingest-panel hidden" id="panelUploadLink">
+          <div class="link-import-card">
+            <div class="link-import-content">
+              <div class="upload-icon-circle link-icon-circle">
+                <i class="fa-solid fa-link"></i>
+              </div>
+              <h3>Paste Any Public Video Link</h3>
+              <p>Vidara will stream the video, extract 16kHz audio, and run full intelligence analysis</p>
+
+              <div class="link-input-row">
+                <div class="link-field-box">
+                  <i class="fa-solid fa-globe link-globe-icon"></i>
+                  <input type="url" id="videoUrlInput" class="form-input link-url-input" placeholder="Paste YouTube, Vimeo, Loom, or direct .mp4 link..." autocomplete="off" />
+                </div>
+                <button type="button" id="fetchVideoUrlBtn" class="btn-action">
+                  <i class="fa-solid fa-cloud-arrow-down"></i> Import & Index
+                </button>
+              </div>
+
+              <div class="platform-support-badges">
+                <span class="plat-badge"><i class="fa-brands fa-youtube"></i> YouTube</span>
+                <span class="plat-badge"><i class="fa-brands fa-vimeo-v"></i> Vimeo</span>
+                <span class="plat-badge"><i class="fa-solid fa-video"></i> Loom</span>
+                <span class="plat-badge"><i class="fa-solid fa-file-video"></i> Direct .MP4 / Web Video</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Selected Video Status Card -->
+        <div class="video-preview-bar hidden" id="videoPreviewBar">
+          <div class="file-details">
+            <i class="fa-solid fa-file-video file-icon"></i>
+            <div class="file-meta">
+              <h4 id="videoFileName">demo_video.mp4</h4>
+              <span id="videoFileStats">00:00 • Ready for Vidara intelligence</span>
+            </div>
+          </div>
+          <button id="startPipelineBtn" class="btn-action">
+            <i class="fa-solid fa-bolt"></i> Index Video & Build Semantic Graph
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIDEO INTELLIGENCE OVERVIEW CARD (Core Thesis & Highlights) -->
+    <section class="card video-overview-card hidden" id="videoOverviewCard">
+      <div class="card-header">
+        <div class="header-title">
+          <i class="fa-solid fa-brain-circuit icon-accent"></i>
+          <h2>Video Intelligence Overview</h2>
+        </div>
+        <span class="badge badge-success" id="videoOverviewBadge">Indexed & Analyzed</span>
+      </div>
+      <div class="card-body">
+        <div class="video-meta-summary">
+          <div class="summary-metric">
+            <span class="metric-label">Duration</span>
+            <span class="metric-val" id="summaryDuration">00:00</span>
+          </div>
+          <div class="summary-metric">
+            <span class="metric-label">Speech Segments</span>
+            <span class="metric-val" id="summarySegments">0</span>
+          </div>
+          <div class="summary-metric">
+            <span class="metric-label">Discovered Topics</span>
+            <span class="metric-val" id="summaryTopics">0</span>
+          </div>
+        </div>
+
+        <div class="thesis-box" style="margin-top: 1rem;">
+          <div class="thesis-label"><i class="fa-solid fa-quote-left"></i> Extracted Core Thesis & Video Takeaway</div>
+          <p id="overviewCoreThesis" style="font-size: 1.05rem; line-height: 1.6; color: var(--text-primary); margin: 0.5rem 0 0;">
+            Thesis will appear after indexing.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- UNIFIED ASK VIDARA COMMAND CENTER -->
+    <section class="card modes-section" id="modesSection">
+      <div class="card-header">
+        <div class="header-title">
+          <i class="fa-solid fa-bullseye icon-accent"></i>
+          <h2>Ask About This Video</h2>
+        </div>
+        <span class="badge badge-success">Natural Language & Voice Search</span>
+      </div>
+
+      <div class="card-body">
+        <div class="unified-ask-container">
+          <p class="section-desc">Ask Vidara to find any concept, topic, or argument in the video. Speak or type in plain English—no exact keywords required.</p>
+          
+          <div class="ask-input-box">
+            <div class="ask-input-wrapper">
+              <i class="fa-solid fa-magnifying-glass search-icon"></i>
+              <input type="text" id="queryTextInput" class="form-input ask-input" placeholder="e.g. Find where the speaker explains assets vs liabilities, or key advice..." autocomplete="off" value="" />
+              <button type="button" id="voiceQueryBtn" class="btn-mic" title="Ask by Voice">
+                <i class="fa-solid fa-microphone"></i>
+              </button>
+            </div>
+            
+            <div class="voice-status-pill hidden" id="voiceStatusPill">
+              <span class="mic-pulsing"></span> Listening... speak your question now
+            </div>
+
+            <div class="ask-sample-prompts">
+              <span>Suggested:</span>
+              <button class="sample-prompt-tag" data-query="Find key takeaways and conclusions">Key Takeaways</button>
+              <button class="sample-prompt-tag" data-query="Show me the core breakdown and advice">Core Advice</button>
+              <button class="sample-prompt-tag" data-query="Find the most stressed points">Main Arguments</button>
+              <button class="sample-prompt-tag" data-query="Extract all top moments">All Highlights</button>
+            </div>
+
+            <div class="ask-action-row" style="display: flex; gap: 12px; margin-top: 6px;">
+              <button id="submitQueryBtn" class="btn-action" style="flex: 2;">
+                <i class="fa-solid fa-arrow-right"></i> Search Video Moments
+              </button>
+              <button id="autoExtractHighlightsBtn" class="btn-secondary" style="flex: 1;">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> Auto-Highlights
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PROCESSING OVERLAY / PROGRESS BAR -->
+    <section class="card processing-card hidden" id="processingCard">
+      <div class="processing-header">
+        <div class="spinner-pulse"></div>
+        <div class="processing-text">
+          <h3 id="processingTitle">Processing Video...</h3>
+          <p id="processingDetail">Extracting audio and generating Groq Whisper word timestamps</p>
+        </div>
+      </div>
+      <div class="progress-track">
+        <div class="progress-bar" id="progressBar" style="width: 15%;"></div>
+      </div>
+      <!-- Detailed Stage Breadcrumb -->
+      <div class="stage-stepper" id="stageStepper">
+        <span class="stage-pill active" id="stgUpload">Uploading</span>
+        <span class="stage-sep">➔</span>
+        <span class="stage-pill" id="stgAudio">Extracting audio</span>
+        <span class="stage-sep">➔</span>
+        <span class="stage-pill" id="stgTranscribe">Transcribing</span>
+        <span class="stage-sep">➔</span>
+        <span class="stage-pill" id="stgIndex">Semantic index</span>
+        <span class="stage-sep">➔</span>
+        <span class="stage-pill" id="stgTopics">Discovering topics</span>
+        <span class="stage-sep">➔</span>
+        <span class="stage-pill" id="stgRank">Ranking topics</span>
+        <span class="stage-sep">➔</span>
+        <span class="stage-pill" id="stgBoundaries">Validating boundaries</span>
+        <span class="stage-sep">➔</span>
+        <span class="stage-pill" id="stgReady">Ready</span>
+      </div>
+    </section>
+
+    <!-- QUERY REASONING PANEL (MODE A RESULT) -->
+    <section class="card query-results-card hidden" id="queryResultsCard">
+      <div class="card-header">
+        <div class="header-title">
+          <i class="fa-solid fa-brain icon-accent"></i>
+          <h2>Vidara Query Intelligence</h2>
+        </div>
+        <span class="badge badge-accent" id="queryResultBadge">Semantic Retrieval</span>
+      </div>
+      <div class="card-body">
+        <div class="query-concepts-box">
+          <div class="concepts-label"><i class="fa-solid fa-diagram-project"></i> Understood Concepts & Synonyms:</div>
+          <div class="concepts-pills" id="queryConceptsPills">
+            <!-- Dynamic concept badges -->
+          </div>
+        </div>
+        <div class="query-reasoning-text" id="queryReasoningText">
+          Vidara retrieved relevant sections.
+        </div>
+      </div>
+    </section>
+
+    <!-- DISCOVERED TOPICS INTELLIGENCE DASHBOARD (MODE B & A RESULTS) -->
+    <section class="card topics-dashboard-card hidden" id="topicsDashboardCard">
+      <div class="card-header">
+        <div class="header-title">
+          <i class="fa-solid fa-list-check icon-accent"></i>
+          <h2 id="topicsDashboardTitle">VIDARA DISCOVERED TOPICS</h2>
+        </div>
+        <div class="header-actions">
+          <button id="showAllScenesBtn" class="btn-ghost btn-sm hidden" style="margin-right: 6px;">
+            <i class="fa-solid fa-layer-group"></i> Show All Video Scenes (<span id="allScenesCount">0</span>)
+          </button>
+          <button id="discoverTopicsBtn" class="btn-secondary btn-sm" style="display:none;" title="Discover Topics Autonomously">
+            <i class="fa-solid fa-brain"></i> Discover Topics
+          </button>
+          <div class="selection-pill" id="selectionPillWrapper">
+            <input type="checkbox" id="selectAllTopicsCheckbox" checked />
+            <label for="selectAllTopicsCheckbox">Select All</label>
+            <span class="selected-count-badge" id="selectedCountBadge">0 Selected</span>
+          </div>
+          <button id="generateSelectedClipsBtn" class="btn-action">
+            <i class="fa-solid fa-scissors"></i> Generate Selected Clips
+          </button>
+          <button id="mergeSelectedClipsBtn" class="btn-primary">
+            <i class="fa-solid fa-film"></i> Merge Selected Clips
+          </button>
+        </div>
+      </div>
+
+      <div class="card-body">
+        <div class="ranked-topics-grid" id="rankedTopicsGrid">
+          <!-- Dynamic Ranked Topic Cards rendered here -->
+        </div>
+      </div>
+    </section>
+
+    <!-- PERSISTED INTENT GRAPH & AUDIENCE ACCORDION (ADVANCED) -->
+    <details class="card advanced-accordion" id="advancedAccordion">
+      <summary class="accordion-summary">
+        <i class="fa-solid fa-sliders icon-accent"></i>
+        <span>Advanced Narrative Graph & Audience Profiles</span>
+        <span class="accordion-hint">Click to inspect underlying Intent Graph and Audience EDLs</span>
+      </summary>
+      <div class="card-body">
+        <div class="thesis-box">
+          <div class="thesis-label"><i class="fa-solid fa-bullseye"></i> Extracted Video Core Thesis</div>
+          <p id="coreThesisText">Thesis will appear after indexing.</p>
+        </div>
+        <div class="audience-grid" id="audienceGrid">
+          <!-- Audience Profile Cards injected via JS -->
+        </div>
+      </div>
+    </details>
+
+    <!-- FINAL OUTPUT & REPURPOSED VIDEO STUDIO -->
+    <section class="card output-section hidden" id="outputSection">
+      <div class="card-header">
+        <div class="header-title">
+          <i class="fa-solid fa-circle-check icon-accent text-green"></i>
+          <h2>Vidara Video Studio</h2>
+        </div>
+        <div class="header-badges">
+          <span class="badge badge-success" id="assemblyStatusBadge">Deterministic FFmpeg Assembly Complete</span>
+        </div>
+      </div>
+
+      <div class="card-body">
+        <!-- Mode Switcher: Merged Master vs Individual Topic Cuts -->
+        <div class="studio-mode-bar">
+          <div class="mode-tabs">
+            <button class="mode-tab active" id="tabMergedVideo">
+              <i class="fa-solid fa-film"></i> Merged Master Video
+            </button>
+            <button class="mode-tab" id="tabIndividualClips">
+              <i class="fa-solid fa-scissors"></i> Individual Topic Clips (<span id="clipsCountBadge">0</span>)
+            </button>
+          </div>
+          <div class="now-playing-pill" id="nowPlayingPill">
+            <span class="pulse-dot"></span>
+            <span id="nowPlayingLabel">Active: Merged Master Video</span>
+          </div>
+        </div>
+
+        <div class="output-grid">
+          <!-- Video Player Column -->
+          <div class="video-player-col">
+            <div class="video-container">
+              <video id="finalVideoPlayer" controls playsinline>
+                <track id="videoSubtitlesTrack" kind="subtitles" srclang="en" label="English" default>
+                Your browser does not support HTML5 video.
+              </video>
+            </div>
+            <div class="output-actions">
+              <a id="downloadVideoBtn" class="btn-primary" download target="_blank">
+                <i class="fa-solid fa-download"></i> <span id="downloadVideoBtnText">Download Merged Master (.mp4)</span>
+              </a>
+              <button id="saveCurrentStudioClipBtn" class="btn-secondary" title="Save this clip permanently to your dashboard">
+                <i class="fa-regular fa-bookmark"></i> Save to Library
+              </button>
+              <button id="quickMergeSelectedBtn" class="btn-action">
+                <i class="fa-solid fa-layer-group"></i> Merge Selected Clips
+              </button>
+              <a id="downloadSubtitlesBtn" class="btn-secondary" download target="_blank">
+                <i class="fa-solid fa-closed-captioning"></i> WebVTT Subtitles
+              </a>
+              <button id="downloadAuditLogBtn" class="btn-ghost">
+                <i class="fa-solid fa-file-shield"></i> Audit Log
+              </button>
+            </div>
+
+            <!-- In-Studio Topic Clips Playlist (Instant Switch & Playback) -->
+            <div class="studio-playlist-container" id="studioPlaylistContainer">
+              <div class="playlist-header">
+                <h4><i class="fa-solid fa-scissors icon-accent"></i> Topic Clips Playlist (<span id="clipsCountBadge">0</span>)</h4>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <button id="mergeClipsActionBtn" class="btn-action btn-sm">
+                    <i class="fa-solid fa-layer-group"></i> Merge Selected
+                  </button>
+                </div>
+              </div>
+              <div class="studio-clips-list" id="studioClipsList">
+                <p class="text-secondary" style="font-size: 0.82rem; padding: 0.5rem 0;" id="emptyPlaylistMsg">Click "Generate Selected Clips" or "Merge" above to load clips here.</p>
+              </div>
+            </div>
+
+            <!-- Standalone Clips Grid Panel -->
+            <div class="individual-clips-panel hidden" id="individualClipsPanel" style="margin-top: 1rem;">
+              <div class="clips-grid" id="clipsGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px;"></div>
+            </div>
+          </div>
+
+          <!-- Video Specs & Summary Column -->
+          <div class="output-info-col">
+            <h3>Intelligence Summary</h3>
+            <div class="info-metric-card">
+              <div class="metric">
+                <span class="label">Original Footage</span>
+                <span class="val" id="metricOriginalDuration">--:--</span>
+              </div>
+              <div class="metric-divider">➔</div>
+              <div class="metric">
+                <span class="label">Extracted Highlights</span>
+                <span class="val text-green" id="metricRepurposedDuration">--:--</span>
+              </div>
+            </div>
+
+            <div class="compression-callout">
+              <div class="comp-icon"><i class="fa-solid fa-compress"></i></div>
+              <div>
+                <strong id="metricCompression">Context-Preserving Compression</strong>
+                <p id="metricCompressionDetail">Complete topic boundaries preserved with +80ms lead-in, +160ms tail-out, and zero syllable clipping.</p>
+              </div>
+            </div>
+
+            <div class="safety-banner" id="safetyBanner">
+              <div class="safety-icon"><i class="fa-solid fa-shield-halved"></i></div>
+              <div class="safety-content">
+                <h4 id="safetyTitle">Zero Distortion Guarantee: Active</h4>
+                <p id="safetyDesc">All 8 editorial integrity checks passed (no severed caveats, polarity preserved, pronoun binding valid).</p>
+              </div>
+              <div class="faithfulness-score">
+                <span class="score-num" id="faithfulnessScore">100%</span>
+                <span class="score-label">Fidelity Score</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- API Key Config Modal (Dual Key & Flagship Support) -->
+  <div class="modal-backdrop hidden" id="configModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-key icon-accent"></i> Groq API Configuration</h3>
+        <button id="closeModalBtn" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-intro">
+          Vidara uses <strong>Groq LPUs</strong> with <strong>Whisper Large-v3</strong> for instant transcription and <strong>GPT-OSS 120B (Flagship)</strong> for deep semantic intelligence.
+          To maximize rate limits, you can provide <strong>two separate Groq API keys</strong> or one master key.
+        </p>
+
+        <div class="form-group">
+          <label for="inputGroqSttKey"><i class="fa-solid fa-microphone-lines"></i> Key 1: Groq STT Key (Audio Extraction & Whisper)</label>
+          <input type="password" id="inputGroqSttKey" placeholder="gsk_... (dedicated for Whisper STT)" class="form-input">
+          <span class="input-hint">Dedicated pool for transcribing 1–2hr+ podcast audio without using LLM tokens.</span>
+        </div>
+
+        <div class="form-group">
+          <label for="inputGroqLlmKey"><i class="fa-solid fa-brain"></i> Key 2: Groq LLM Key (GPT-OSS 120B Intelligence)</label>
+          <input type="password" id="inputGroqLlmKey" placeholder="gsk_... (dedicated for 120B reasoning)" class="form-input">
+          <span class="input-hint">Dedicated pool for deep topic discovery, search queries, and editorial reasoning.</span>
+        </div>
+
+        <div class="form-divider" style="display:flex;align-items:center;margin:1rem 0;color:var(--text-muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:1px;">
+          <span style="flex:1;height:1px;background:var(--border-color);margin-right:0.75rem;"></span>
+          <span>OR SINGLE MASTER KEY</span>
+          <span style="flex:1;height:1px;background:var(--border-color);margin-left:0.75rem;"></span>
+        </div>
+
+        <div class="form-group">
+          <label for="inputGroqKey"><i class="fa-solid fa-asterisk"></i> Master Groq API Key</label>
+          <input type="password" id="inputGroqKey" placeholder="gsk_..." class="form-input">
+          <span class="input-hint">Used for all tasks if dedicated keys are left blank.</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="saveConfigBtn" class="btn-primary"><i class="fa-solid fa-floppy-disk"></i> Save & Apply Credentials</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AUTHENTICATION MODAL (Phone OTP & Google Sign-In) -->
+  <div class="modal-backdrop hidden" id="authModal">
+    <div class="modal-box auth-modal-box">
+      <div class="modal-header">
+        <div class="auth-header-title">
+          <div class="brand-icon-sm"><i class="fa-solid fa-atom"></i></div>
+          <div>
+            <h3>Welcome to Vidara</h3>
+            <p class="modal-subtitle">Sign in to save your clips permanently and access your personal video library.</p>
+          </div>
+        </div>
+        <button id="closeAuthModalBtn" class="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Auth Method Tabs -->
+        <div class="auth-tabs">
+          <button type="button" class="auth-tab active" id="tabAuthPhone">
+            <i class="fa-solid fa-mobile-screen"></i> Phone Number + OTP
+          </button>
+          <button type="button" class="auth-tab" id="tabAuthGoogle">
+            <i class="fa-brands fa-google"></i> Google Account
+          </button>
+        </div>
+
+        <!-- Panel 1: Phone OTP -->
+        <div class="auth-panel" id="panelAuthPhone">
+          <div class="form-group">
+            <label for="authNameInput"><i class="fa-solid fa-user"></i> Your Full Name</label>
+            <input type="text" id="authNameInput" placeholder="e.g. Vishnu Karanth" class="form-input" autocomplete="name" />
+          </div>
+
+          <div class="form-group">
+            <label for="authPhoneInput"><i class="fa-solid fa-phone"></i> Mobile Number</label>
+            <div class="phone-input-wrap">
+              <span class="phone-prefix"><i class="fa-solid fa-globe"></i></span>
+              <input type="tel" id="authPhoneInput" placeholder="+91 9876543210 (include country code)" class="form-input" autocomplete="tel" />
+              <button type="button" id="sendOtpBtn" class="btn-action btn-sm">
+                <i class="fa-solid fa-paper-plane"></i> Send OTP
+              </button>
+            </div>
+            <span class="input-hint">A 6-digit one-time verification code will be sent to your number.</span>
+          </div>
+
+          <!-- OTP Input Section (Toggled after sending OTP) -->
+          <div class="otp-section hidden" id="otpSection">
+            <div class="otp-dev-banner" id="otpDevBanner">
+              <i class="fa-solid fa-key icon-accent"></i>
+              <span>Verification code: <strong id="devOtpBadge">------</strong> <small>(valid for 5 mins)</small></span>
+            </div>
+
+            <div class="form-group">
+              <label for="authOtpInput"><i class="fa-solid fa-shield-halved"></i> Enter 6-Digit Code</label>
+              <input type="text" id="authOtpInput" placeholder="● ● ● ● ● ●" maxlength="6" class="form-input otp-code-input" autocomplete="one-time-code" />
+            </div>
+
+            <button type="button" id="verifyOtpBtn" class="btn-primary btn-block">
+              <i class="fa-solid fa-circle-check"></i> Verify & Enter Vidara
+            </button>
+          </div>
+        </div>
+
+        <!-- Panel 2: Google Sign-In -->
+        <div class="auth-panel hidden" id="panelAuthGoogle">
+          <p class="google-auth-intro">
+            Connect securely with your Google account. Your profile name and Google avatar will be automatically linked to your personal clip library.
+          </p>
+
+          <div class="google-auth-box">
+            <!-- Official Google Identity Services button mount -->
+            <div id="googleGsiContainer" style="display: flex; justify-content: center; margin: 15px 0;"></div>
+
+            <!-- Instant Google Sign-In Fallback Button -->
+            <button type="button" id="directGoogleLoginBtn" class="btn-google-sign">
+              <i class="fa-brands fa-google text-red"></i>
+              <span>Continue with Google Account</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MY PERMANENT LIBRARY & SAVED CLIPS MODAL -->
+  <div class="modal-backdrop hidden" id="libraryModal">
+    <div class="modal-box library-modal-box">
+      <div class="modal-header">
+        <div>
+          <h3><i class="fa-solid fa-bookmark icon-accent"></i> My Permanent Library</h3>
+          <p class="modal-subtitle">Your saved clips and past analyzed videos are permanently preserved here.</p>
+        </div>
+        <button id="closeLibraryModalBtn" class="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Library Tabs -->
+        <div class="library-tabs">
+          <button type="button" class="lib-tab active" id="tabLibClips">
+            <i class="fa-solid fa-scissors"></i> Saved Video Clips (<span id="libClipsCountBadge">0</span>)
+          </button>
+          <button type="button" class="lib-tab" id="tabLibVideos">
+            <i class="fa-solid fa-film"></i> Uploaded Projects (<span id="libVideosCountBadge">0</span>)
+          </button>
+        </div>
+
+        <!-- Saved Clips Grid Panel -->
+        <div class="lib-panel" id="panelLibClips">
+          <div class="saved-clips-grid" id="savedClipsGrid">
+            <!-- Injected dynamically via JS -->
+          </div>
+          <div class="empty-lib-box hidden" id="emptyLibraryClipsMsg">
+            <i class="fa-regular fa-bookmark empty-lib-icon"></i>
+            <h4>No Saved Clips Yet</h4>
+            <p>When Vidara generates topic clips or you find favorite moments, click <strong>"Save Clip"</strong> to keep them in your permanent library forever.</p>
+          </div>
+        </div>
+
+        <!-- Saved Videos Panel -->
+        <div class="lib-panel hidden" id="panelLibVideos">
+          <div class="saved-videos-list" id="savedVideosList">
+            <!-- Injected dynamically via JS -->
+          </div>
+          <div class="empty-lib-box hidden" id="emptyLibraryVideosMsg">
+            <i class="fa-solid fa-film empty-lib-icon"></i>
+            <h4>No Video Projects Found</h4>
+            <p>Upload a video or paste a YouTube URL to automatically save projects to your profile.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

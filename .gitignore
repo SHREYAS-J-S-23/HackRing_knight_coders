@@ -1,0 +1,33 @@
+# Environment configuration & Secrets
+.env
+.env.*
+!.env.example
+
+# Python cache, pytest & virtual environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+scratch/
+
+# Database files
+*.db
+vidara.db
+storage/vidara.db
+
+# Vidara local storage & media caches
+storage/uploads/*
+storage/audio/*
+storage/outputs/*
+!storage/uploads/.gitkeep
+!storage/audio/.gitkeep
+!storage/outputs/.gitkeep
+
+# IDE and OS artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
