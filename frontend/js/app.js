@@ -1713,6 +1713,15 @@ document.addEventListener('DOMContentLoaded', () => {
   async function checkAuthState() {
     if (!state.token) {
       updateUserUI();
+      // Initially display the authentication modal when entering the site without an active session
+      setTimeout(() => {
+        if (!state.token && authModal) {
+          authModal.classList.remove('hidden');
+          if (typeof window.switchAuthView === 'function') {
+            window.switchAuthView('login');
+          }
+        }
+      }, 100);
       return;
     }
     try {
@@ -1725,6 +1734,12 @@ document.addEventListener('DOMContentLoaded', () => {
         updateUserUI();
       } else {
         clearSession();
+        if (authModal) {
+          authModal.classList.remove('hidden');
+          if (typeof window.switchAuthView === 'function') {
+            window.switchAuthView('login');
+          }
+        }
       }
     } catch (e) {
       console.warn("Could not check auth state:", e);
