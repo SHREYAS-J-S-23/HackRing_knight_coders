@@ -166,6 +166,7 @@ class PodcastExchangeCandidate(BaseModel):
     validation_status: str = "PASSED"
 
 class ValidatedClipCandidate(BaseModel):
+    model_config = {"extra": "allow"}
     topic_id: str
     topic_title: str
     start_ms: int
@@ -181,6 +182,7 @@ class ValidatedClipCandidate(BaseModel):
     relevance_score: float = 1.0
     redundancy_score: float = 0.0
     standalone_score: float = 1.0
+    quality_score: Optional[float] = 1.0
     requires_expansion: bool = False
     validation_status: str = "PASSED"
     exchange_type: Optional[str] = "GENERAL_TOPIC"

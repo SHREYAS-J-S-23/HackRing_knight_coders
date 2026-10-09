@@ -11,10 +11,11 @@ class AudioExtractor:
         Returns the path to the extracted .wav or .mp3 file.
         """
         ffmpeg_bin = get_ffmpeg_executable()
+        video_path = Path(video_path).resolve()
         if output_filename is None:
             output_filename = f"{video_path.stem}.mp3"
         
-        output_path = AUDIO_DIR / output_filename
+        output_path = (AUDIO_DIR / output_filename).resolve()
 
         # Command to extract 16kHz audio for optimal Whisper processing
         # 32kbps keeps 1 hour of audio at ~14MB (well below Whisper limits)
@@ -32,6 +33,22 @@ class AudioExtractor:
 
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
+            if "does not contain any stream" in result.stderr or "Output file does not contain any stream" in result.stderr:
+                # Video has no audio track: synthesize silent audio so the pipeline handles it smoothly
+                duration = AudioExtractor.get_video_duration(video_path) or 2.0
+                cmd_silent = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-f", "lavfi",
+                    "-i", "anullsrc=r=16000:cl=mono",
+                    "-t", str(max(1.0, duration)),
+                    "-acodec", "libmp3lame",
+                    "-b:a", "32k",
+                    str(output_path)
+                ]
+                res_silent = subprocess.run(cmd_silent, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if res_silent.returncode == 0 and output_path.exists():
+                    return output_path
             raise RuntimeError(f"FFmpeg audio extraction failed: {result.stderr}")
         
         return output_path
@@ -103,6 +120,7 @@ class AudioExtractor:
     def get_video_duration(video_path: Path) -> float:
         """Extracts exact video duration in seconds via FFmpeg/ffprobe."""
         ffmpeg_bin = get_ffmpeg_executable()
+        video_path = Path(video_path).resolve()
         cmd = [
             ffmpeg_bin,
             "-i", str(video_path)

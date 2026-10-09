@@ -1,6 +1,7 @@
 import json
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Tuple
 from groq import Groq
+from openai import OpenAI
 from backend.config import get_groq_api_key, get_groq_llm_api_key, GROQ_MODEL, GROQ_FALLBACK_MODEL, AGNES_API_KEY, AGNES_BASE_URL
 from backend.models.schemas import (
     EnrichedTranscript,
