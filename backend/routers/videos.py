@@ -108,11 +108,25 @@ def get_session_data(video_id: str, user_id: Optional[str] = None) -> Dict[str, 
             segments=t_segs
         )
 
+    video_path = vid.get("filepath", "")
+    if not video_path or not Path(video_path).is_file():
+        for ext in [".mp4", ".mov", ".mkv", ".webm", ".avi"]:
+            cand = UPLOAD_DIR / f"{video_id}{ext}"
+            if cand.is_file():
+                video_path = str(cand)
+                break
+
+    audio_path = vid.get("audio_path", "")
+    if not audio_path or not Path(audio_path).is_file():
+        cand_audio = AUDIO_DIR / f"{video_id}.mp3"
+        if cand_audio.is_file():
+            audio_path = str(cand_audio)
+
     session = {
         "video_id": video_id,
         "filename": vid["filename"],
-        "video_path": vid["filepath"],
-        "audio_path": vid.get("audio_path", ""),
+        "video_path": video_path,
+        "audio_path": audio_path,
         "duration": vid["duration"],
         "transcript": transcript_obj,
         "topics": [DiscoveredTopic(**t) for t in topics] if topics else [],
@@ -202,7 +216,7 @@ async def upload_video(
             job_id=f"job_{video_id}",
             video_id=video_id,
             job_type="ingestion",
-            status="completed",
+            status="uploaded",
             progress=20,
             stage="Audio Extracted",
             message=f"Uploaded {file.filename} ({round(duration, 1)}s). Ready for intelligence analysis.",
@@ -289,7 +303,7 @@ async def ingest_video_url(
             job_id=f"job_{video_id}",
             video_id=video_id,
             job_type="ingestion",
-            status="completed",
+            status="uploaded",
             progress=20,
             stage="Audio Extracted",
             message=f"Imported from link: {filename} ({round(duration, 1)}s). Ready for intelligence analysis.",
@@ -343,7 +357,39 @@ def _run_analysis_pipeline(video_id: str, user_id: Optional[str] = None) -> None
         except Exception:
             return
 
-    audio_path = Path(session["audio_path"])
+    raw_audio = session.get("audio_path") or ""
+    audio_path = Path(raw_audio) if raw_audio else None
+    if not audio_path or not audio_path.is_file():
+        candidate_audio = AUDIO_DIR / f"{video_id}.mp3"
+        if candidate_audio.is_file():
+            audio_path = candidate_audio
+            session["audio_path"] = str(candidate_audio)
+        else:
+            raw_video = session.get("video_path") or ""
+            video_path = Path(raw_video) if raw_video else None
+            if not video_path or not video_path.is_file():
+                for ext in [".mp4", ".mov", ".mkv", ".webm", ".avi"]:
+                    c_vid = UPLOAD_DIR / f"{video_id}{ext}"
+                    if c_vid.is_file():
+                        video_path = c_vid
+                        session["video_path"] = str(c_vid)
+                        break
+            if video_path and video_path.is_file():
+                audio_path = AudioExtractor.extract_audio(video_path, f"{video_id}.mp3")
+                session["audio_path"] = str(audio_path)
+            else:
+                DatabaseService.set_job(
+                    job_id=f"job_{video_id}",
+                    video_id=video_id,
+                    job_type="indexing",
+                    status="failed",
+                    progress=0,
+                    stage="Failed",
+                    message=f"Audio file not found for video {video_id}",
+                    error=f"Audio file not found for video {video_id}",
+                    user_id=user_id
+                )
+                return
 
     DatabaseService.set_job(
         job_id=f"job_{video_id}",
@@ -465,40 +511,43 @@ async def analyze_video(
     # If already completed (re-run guard), return result directly
     job = DatabaseService.get_job(f"job_{video_id}")
 
-    # Guard 1: job record with result payload (from new runs that store result)
-    if job and job.get("status") == "completed" and job.get("result") and not wait:
-        result = job["result"]
-        return {
-            "status": "success",
-            "video_id": video_id,
-            "already_indexed": True,
-            **result
-        }
+    # Guard 1: job record with result payload AND actual topics
+    if job and job.get("status") == "completed" and job.get("job_type") in ("indexing", "analysis") and not wait:
+        result = job.get("result") or {}
+        topics = result.get("topics") or []
+        if topics and len(topics) > 0:
+            return {
+                "status": "success",
+                "video_id": video_id,
+                "already_indexed": True,
+                **result
+            }
 
-    # Guard 2: transcript already in cache/session (in-memory fast path)
+    # Guard 2: transcript already in cache/session (in-memory fast path) AND has topics
     if session.get("transcript") and not wait:
         topics = session.get("topics") or [t for t in DatabaseService.get_topics(video_id)]
-        thesis = ""
-        ig = session.get("intent_graph")
-        if ig:
-            thesis = ig.core_thesis
-        if not thesis:
-            vid = DatabaseService.get_video(video_id)
-            thesis = (vid or {}).get("core_thesis", "")
-        return {
-            "status": "success",
-            "video_id": video_id,
-            "already_indexed": True,
-            "core_thesis": thesis,
-            "segment_count": len(session["transcript"].segments) if hasattr(session["transcript"], "segments") else 0,
-            "topic_count": len(topics),
-            "topics": [t.model_dump() if hasattr(t, "model_dump") else t for t in topics]
-        }
+        if topics and len(topics) > 0:
+            thesis = ""
+            ig = session.get("intent_graph")
+            if ig:
+                thesis = ig.core_thesis
+            if not thesis:
+                vid = DatabaseService.get_video(video_id)
+                thesis = (vid or {}).get("core_thesis", "")
+            return {
+                "status": "success",
+                "video_id": video_id,
+                "already_indexed": True,
+                "core_thesis": thesis,
+                "segment_count": len(session["transcript"].segments) if hasattr(session["transcript"], "segments") else 0,
+                "topic_count": len(topics),
+                "topics": [t.model_dump() if hasattr(t, "model_dump") else t for t in topics]
+            }
 
-    # Guard 3: segments already in DB (e.g., server restarted but DB is persistent)
+    # Guard 3: segments already in DB AND topics already in DB
     existing_segs = DatabaseService.get_segments(video_id)
-    if existing_segs and len(existing_segs) > 0 and not wait:
-        existing_topics = DatabaseService.get_topics(video_id)
+    existing_topics = DatabaseService.get_topics(video_id)
+    if existing_segs and len(existing_segs) > 0 and existing_topics and len(existing_topics) > 0 and not wait:
         vid = DatabaseService.get_video(video_id)
         return {
             "status": "success",
@@ -511,7 +560,7 @@ async def analyze_video(
         }
 
     # Guard 4: already running — don't double-queue
-    if job and job.get("status") in ("queued", "processing") and not wait:
+    if job and job.get("status") in ("queued", "processing") and job.get("job_type") in ("transcription", "indexing", "analysis") and not wait:
         return {
             "status": "queued",
             "video_id": video_id,
@@ -575,17 +624,19 @@ async def get_analyze_result(
         raise HTTPException(status_code=404, detail="Analysis job not found. Did you call /analyze first?")
 
     status = job.get("status", "")
+    job_type = job.get("job_type", "")
     if status == "failed":
         raise HTTPException(status_code=500, detail=f"Analysis failed: {job.get('message', 'Unknown error')}")
 
-    if status != "completed":
+    if status != "completed" or job_type not in ("indexing", "analysis"):
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=202,
             content={
                 "status": status,
+                "job_type": job_type,
                 "progress": job.get("progress", 0),
-                "stage": job.get("current_stage", "Processing"),
+                "stage": job.get("stage") or job.get("current_stage", "Processing"),
                 "message": job.get("message", "Still processing...")
             }
         )
@@ -961,6 +1012,7 @@ async def get_job_status(
     return {
         "video_id": video_id,
         "job_id": job.get("id", f"job_{video_id}"),
+        "job_type": job.get("job_type", "indexing"),
         "status": job["status"],
         "progress": job.get("progress", 0),
         "stage": job.get("stage") or job.get("current_stage", "Processing"),

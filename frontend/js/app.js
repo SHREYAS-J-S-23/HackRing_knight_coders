@@ -340,20 +340,30 @@ document.addEventListener('DOMContentLoaded', () => {
             setStagePill(pill);
             setProcessing(true, `${stage}...`, msg, progress, pill);
 
-            if (sData.status === 'completed') {
-              clearInterval(poller);
-              // STEP 3: Fetch the full result once done
+            const isFinishedStage = (sData.status === 'completed' &&
+              sData.stage !== 'Audio Extracted' &&
+              sData.stage !== 'Media ingestion' &&
+              sData.job_type !== 'ingestion' &&
+              (sData.stage === 'Semantic Index Built' || sData.stage === 'Ready' || progress >= 95));
+
+            if (isFinishedStage) {
               try {
                 const resultRes = await apiFetch(`/api/videos/${videoId}/analyze-result`);
+                if (resultRes.status === 202) {
+                  // Still packaging results, keep poller active
+                  return;
+                }
                 if (!resultRes.ok) {
+                  clearInterval(poller);
                   const errText = await resultRes.text();
                   reject(new Error(`Result fetch failed: ${errText}`));
                   return;
                 }
+                clearInterval(poller);
                 const resultData = await resultRes.json();
                 resolve(resultData);
               } catch (e) {
-                reject(e);
+                // Network hiccup, keep poller active
               }
             } else if (sData.status === 'failed') {
               clearInterval(poller);
