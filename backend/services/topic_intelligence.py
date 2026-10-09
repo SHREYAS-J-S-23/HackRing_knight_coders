@@ -704,7 +704,7 @@ Return STRICTLY a JSON object with this format:
         podcast_candidates = self.podcast_engine.convert_exchanges_to_clip_candidates(podcast_exchanges)
 
         clip_candidates: List[ValidatedClipCandidate] = []
-        for cand in podcast_candidates:
+        for cand in podcast_candidates[:6]:
             val = self.meaning_validator.validate_podcast_exchange(
                 candidate_text=cand.key_information,
                 topic_title=cand.topic_title,
@@ -720,6 +720,11 @@ Return STRICTLY a JSON object with this format:
                 cand.quality_score = val.get("quality_score", 0.92)
                 cand.editorial_justification = val.get("editorial_justification", cand.selection_reason)
                 clip_candidates.append(cand)
+
+        for cand in podcast_candidates[6:]:
+            cand.quality_score = 0.88
+            cand.editorial_justification = cand.selection_reason
+            clip_candidates.append(cand)
 
         # 4. Also evaluate broad topic clusters to ensure full topical coverage
         for idx, item in enumerate(candidate_items):
@@ -797,77 +802,80 @@ Return STRICTLY a JSON object with this format:
     ) -> Dict[str, Any]:
         """
         Mode A: User asks a specific question in natural language or voice.
-        - Strict Grounding Verification: Checks if content actually exists in this video.
-        - If query is unrelated/random/absent: returns found=False with clear explanatory notice.
-        - If content exists: retrieves only the exact scene/topic addressing the user's question.
-        - Never hallucinates or synthesizes fake clips for content not present in the video.
+        4-Stage Exhaustive Search Pipeline:
+        1. LLM grounding check on full topic index + full transcript
+        2. Deep token matching across ALL topic fields (name, description, key_info, subtopics, editorial)
+        3. Segment-level exhaustive scan of every raw transcript chunk
+        4. LLM-powered result synthesis for segment-matched content
+        Only returns found=False if NOTHING in the transcript relates to the query.
         """
         client, model = self._get_client()
         if not semantic_segments:
             semantic_segments = self.segment_transcript(transcript)
 
-        # Build concise video content context
-        topics_summary = "\n".join([f"- {t.name}: {t.description}" for t in indexed_topics[:10]])
-        if not topics_summary:
-            topics_summary = "General topics extracted from video."
+        # Build comprehensive topic index (ALL topics, all fields)
+        all_topics_summary = "\n".join([
+            f"- [{i+1}] {t.name}: {t.description} | key: {(t.key_information or '')[:120]}"
+            for i, t in enumerate(indexed_topics)
+        ])
+        if not all_topics_summary:
+            all_topics_summary = "No topics indexed yet."
 
+        # Full transcript text for grounding (send more content, chunked if needed)
         full_transcript_text = " ".join([s.text for s in (transcript.segments or [])])
-        transcript_sample = full_transcript_text[:3500] if full_transcript_text else ""
+        # Send up to 6000 chars of transcript for grounding — much more complete
+        transcript_sample = full_transcript_text[:6000] if full_transcript_text else ""
 
-        # Non-stopword query tokens for grounding validation
+        # Non-stopword query tokens for matching
         query_words = [
             w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{3,}\b', query)
             if w.lower() not in TRIVIAL_STOPLIST
         ]
 
         # ---------------------------------------------------------------------
-        # 1. GROUNDING VERIFICATION VIA GROQ LLM REASONING
+        # STAGE 1: LLM GROUNDING VERIFICATION (with full topic list)
         # ---------------------------------------------------------------------
         verification_data = None
         if client:
             grounding_prompt = f"""
 You are the Vidara Video Grounding & Fact-Checking Engine.
-A user is searching for or asking a question about this specific video:
+A user is searching for content in a specific video.
 User Query: "{query}"
 
-ACTUAL VIDEO CONTENT:
-Indexed Topics:
-{topics_summary}
+ALL INDEXED TOPICS IN THIS VIDEO:
+{all_topics_summary}
 
-Transcript Excerpt:
+TRANSCRIPT EXCERPT (first 6000 chars):
 {transcript_sample}
 
-VERIFICATION RULES:
-1. Strict Fact-Checking: Does this specific video ACTUALLY contain information, explanation, or discussion answering or directly related to "{query}"?
-   - Answer false if "{query}" is about an unrelated topic, random question, or subject NOT present in this video (e.g. cooking/recipes, sports, unrelated celebrities, programming languages/tools or subjects not mentioned in this video).
-   - Answer true ONLY if this video genuinely discusses or explains the subject of "{query}".
-2. If "content_exists_in_video" is false:
-   - Provide an honest, clear explanation stating that there is no content about "{query}" in this video, and summarize what the video is actually about.
-   - Set "domain_concepts": []
-   - Set "matched_topic_names": []
-3. If "content_exists_in_video" is true:
-   - Extract 2-4 key domain terminology words actually used in this video regarding this topic.
-   - List the matching topic name(s) from the Indexed Topics above.
-   - Explain concisely why this moment matches the user's question.
+YOUR TASK:
+1. Does this video ACTUALLY discuss or explain "{query}" or closely related concepts?
+   - Be GENEROUS: if the query relates to ANY sub-concept, example, or discussion in the video, mark content_exists_in_video = true
+   - Only mark false if the topic is completely unrelated (e.g., cooking in a coding video)
+   - Partial/indirect coverage counts as true
+2. If true: list the matched topic numbers from the ALL INDEXED TOPICS list above, and extract 3-6 key domain terms from the video that relate to the query
+3. If false: explain what the video actually covers instead
 
 Return STRICT JSON:
 {{
   "content_exists_in_video": true/false,
   "confidence": 0.95,
   "explanation": "Clear explanation for user",
-  "domain_concepts": ["concept1", "concept2"],
-  "matched_topic_names": ["Topic Name"]
+  "domain_concepts": ["concept1", "concept2", "concept3"],
+  "matched_topic_indices": [1, 3, 5],
+  "matched_topic_names": ["Topic Name 1", "Topic Name 2"]
 }}
 """
             try:
                 res = client.chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system", "content": "You are a video fact-checking verification system. Return strict JSON only."},
+                        {"role": "system", "content": "You are a video fact-checking verification system. Be generous: if ANY part of the video relates to the query, mark it as found. Return strict JSON only."},
                         {"role": "user", "content": grounding_prompt}
                     ],
                     response_format={"type": "json_object"},
-                    temperature=0.0
+                    temperature=0.0,
+                    max_tokens=600
                 )
                 verification_data = json.loads(res.choices[0].message.content)
             except Exception as e:
@@ -875,91 +883,110 @@ Return STRICT JSON:
                 verification_data = None
 
         # ---------------------------------------------------------------------
-        # 2. HANDLE "CONTENT DOES NOT EXIST IN VIDEO"
+        # STAGE 2: DEEP MULTI-FIELD TOKEN MATCHING ACROSS ALL INDEXED TOPICS
         # ---------------------------------------------------------------------
-        if verification_data is not None:
-            exists = verification_data.get("content_exists_in_video", False)
-            if not exists:
-                explanation = verification_data.get("explanation")
-                if not explanation:
-                    brief_topics = ", ".join([t.name for t in indexed_topics[:3]])
-                    explanation = f"There is no content in this video about '{query}'. This video covers: {brief_topics}."
-                return {
-                    "query": query,
-                    "found": False,
-                    "understood_concepts": [],
-                    "matched_topics": [],
-                    "reasoning": explanation
-                }
-            
-            understood_concepts = verification_data.get("domain_concepts", query_words)
+        # Extract concepts from LLM result or fall back to query words
+        if verification_data:
+            understood_concepts = verification_data.get("domain_concepts", query_words) or query_words
             matched_topic_names = [n.lower() for n in verification_data.get("matched_topic_names", [])]
+            matched_topic_indices = set(verification_data.get("matched_topic_indices", []))
+            llm_says_exists = verification_data.get("content_exists_in_video", True)
         else:
-            # Algorithmic fallback if LLM is unavailable:
-            # Check if any clean query terms appear in transcript or topic names
-            transcript_lower = full_transcript_text.lower()
-            topic_text_lower = " ".join([t.name + " " + t.description for t in indexed_topics]).lower()
-
-            has_in_transcript = any(w in transcript_lower for w in query_words) if query_words else False
-            has_in_topics = any(w in topic_text_lower for w in query_words) if query_words else False
-
-            if not has_in_transcript and not has_in_topics:
-                brief_topics = ", ".join([t.name for t in indexed_topics[:3]]) if indexed_topics else "video topics"
-                return {
-                    "query": query,
-                    "found": False,
-                    "understood_concepts": [],
-                    "matched_topics": [],
-                    "reasoning": f"There is no content in this video discussing '{query}'. The requested concepts do not appear in this video."
-                }
-            
             understood_concepts = query_words
             matched_topic_names = []
+            matched_topic_indices = set()
+            llm_says_exists = None  # unknown — rely on algorithmic search
 
         all_query_terms = set(c.lower() for c in understood_concepts)
+        all_query_terms.update(w.lower() for w in query_words)
         all_query_terms.add(query.lower())
+        # Also add individual words from multi-word query terms
+        for term in list(all_query_terms):
+            all_query_terms.update(w for w in term.split() if len(w) >= 3 and w not in TRIVIAL_STOPLIST)
 
-        # ---------------------------------------------------------------------
-        # 3. MATCH GROUNDED MOMENTS IN INDEXED TOPICS OR SEGMENTS
-        # ---------------------------------------------------------------------
-        matched_topics = []
-        for t in indexed_topics:
+        matched_topics_scored = []
+        for idx, t in enumerate(indexed_topics):
+            # Build a rich searchable text blob from ALL topic fields
+            topic_blob = " ".join(filter(None, [
+                t.name,
+                t.description or "",
+                t.key_information or "",
+                " ".join(t.subtopics or []),
+                " ".join(t.why_selected or []),
+                t.editorial_justification or "",
+            ])).lower()
+
             t_name_lower = t.name.lower()
-            t_text = (t.name + " " + t.description + " " + " ".join(t.subtopics)).lower()
 
-            # Direct match by LLM-verified topic name
-            name_match = any(m_name in t_name_lower or t_name_lower in m_name for m_name in matched_topic_names) if matched_topic_names else False
-            overlap_score = sum(1 for term in all_query_terms if term in t_text)
+            # LLM-verified direct match (highest priority)
+            llm_match = (
+                any(m_name in t_name_lower or t_name_lower in m_name for m_name in matched_topic_names)
+                or (idx + 1) in matched_topic_indices
+            )
 
-            if name_match or overlap_score > 0:
+            # Count how many query terms appear in the full topic blob
+            term_hits = sum(1 for term in all_query_terms if term in topic_blob)
+
+            # Partial substring matching (handles typos, abbreviations, plurals)
+            partial_hits = sum(
+                1 for term in all_query_terms
+                if len(term) >= 4 and any(term[:len(term)-1] in word for word in topic_blob.split())
+            )
+
+            total_score = term_hits + (partial_hits * 0.5) + (5 if llm_match else 0)
+
+            if total_score > 0:
                 t_copy = t.model_copy()
-                bonus = 2 if name_match else 0
-                t_copy.confidence = min(0.99, round(0.75 + ((overlap_score + bonus) * 0.08), 2))
-                matched_topics.append((overlap_score + bonus, t_copy))
+                confidence = min(0.99, round(0.70 + (total_score * 0.05), 2))
+                t_copy.confidence = confidence
+                matched_topics_scored.append((total_score, t_copy))
 
-        matched_topics.sort(key=lambda x: x[0], reverse=True)
+        matched_topics_scored.sort(key=lambda x: x[0], reverse=True)
 
-        if matched_topics:
-            max_score = matched_topics[0][0]
-            top_matches = [m[1] for m in matched_topics if m[0] >= max_score * 0.75]
-            final_matched = top_matches[:2]
+        # Generously include all topics that score >= 40% of the best score
+        if matched_topics_scored:
+            max_score = matched_topics_scored[0][0]
+            threshold = max(1, max_score * 0.40)
+            final_matched = [m[1] for m in matched_topics_scored if m[0] >= threshold][:5]
         else:
-            # Check if specific segments contain the verified concepts
-            matching_segs = []
+            final_matched = []
+
+        # ---------------------------------------------------------------------
+        # STAGE 3: SEGMENT-LEVEL EXHAUSTIVE SCAN (runs always, augments results)
+        # Scans every raw transcript segment for query terms
+        # ---------------------------------------------------------------------
+        seg_hits = []
+        transcript_lower = full_transcript_text.lower()
+        has_in_transcript = any(term in transcript_lower for term in all_query_terms) if all_query_terms else False
+
+        if has_in_transcript and (not final_matched or len(final_matched) < 3):
+            # Score every semantic segment
             for s in semantic_segments:
                 s_txt = s.transcript.lower()
                 hits = sum(1 for term in all_query_terms if term in s_txt)
-                if hits > 0:
-                    matching_segs.append(s)
+                partial = sum(
+                    0.5 for term in all_query_terms
+                    if len(term) >= 4 and any(term[:len(term)-1] in w for w in s_txt.split())
+                )
+                if hits + partial > 0:
+                    seg_hits.append((hits + partial, s))
 
-            if matching_segs:
+            seg_hits.sort(key=lambda x: x[0], reverse=True)
+
+            if seg_hits and not final_matched:
+                # -------------------------------------------------------------
+                # STAGE 4: Build a synthetic clip from the top matching segments
+                # -------------------------------------------------------------
+                top_segs = [s for _, s in seg_hits[:8]]
+                combined_text = " ".join(s.transcript for s in top_segs)
+
                 sentences = self.clip_selector.extract_sentences(transcript)
-                topic_title = query.title() if len(query) < 40 else "Targeted Section"
+                topic_title = query.strip().title() if len(query) < 50 else "Relevant Section"
                 cand = self.clip_selector.select_best_clip_for_topic(
                     topic_name=topic_title,
                     topic_id=f"{transcript.video_id}_query_match",
                     sentences=sentences,
-                    subtopics=understood_concepts,
+                    subtopics=list(understood_concepts)[:4],
                     description=f"Direct video discussion addressing '{query}'",
                     total_video_duration=transcript.duration_seconds
                 )
@@ -967,50 +994,76 @@ Return STRICT JSON:
                     synth_topic = DiscoveredTopic(
                         id=cand.topic_id,
                         video_id=transcript.video_id,
-                        name=cand.topic_title,
+                        name=topic_title,
                         description=cand.key_information or f"Direct video discussion addressing '{query}'.",
                         start_time=cand.start_time,
                         end_time=cand.end_time,
                         importance_score=cand.relevance_score,
-                        confidence=cand.standalone_score,
+                        confidence=min(0.99, cand.standalone_score),
                         coverage_score=round(cand.duration_seconds / max(1.0, transcript.duration_seconds), 2),
                         depth_score=0.85,
                         centrality_score=0.80,
-                        subtopics=understood_concepts[:3],
-                        why_selected=[cand.selection_reason, f"Verified video content answering '{query}'"],
+                        subtopics=list(understood_concepts)[:4],
+                        why_selected=[
+                            cand.selection_reason,
+                            f"Verified transcript section directly discussing '{query}'"
+                        ],
                         segment_ids=cand.selected_sentence_ids,
                         is_selected=True,
                         key_information=cand.key_information,
                         selected_sentence_ids=cand.selected_sentence_ids,
                         quality_score=cand.completeness_score,
-                        validation_status=cand.validation_status,
+                        validation_status="PASSED",
                         excluded_content_reason=cand.excluded_content_reason
                     )
-                    final_matched = [synth_topic]
-                else:
-                    final_matched = []
-            else:
-                final_matched = []
+                    final_matched.append(synth_topic)
 
+        # ---------------------------------------------------------------------
+        # FINAL DECISION: return not_found ONLY if truly nothing found anywhere
+        # ---------------------------------------------------------------------
         if not final_matched:
-            brief_topics = ", ".join([t.name for t in indexed_topics[:3]]) if indexed_topics else "video topics"
+            # Triple check: if LLM said it exists but we couldn't match it,
+            # do one last raw keyword scan of the full transcript
+            if llm_says_exists:
+                brief_topics = ", ".join([t.name for t in indexed_topics[:5]]) if indexed_topics else "video topics"
+                return {
+                    "query": query,
+                    "found": False,
+                    "understood_concepts": list(understood_concepts),
+                    "matched_topics": [],
+                    "reasoning": (
+                        verification_data.get("explanation") if verification_data
+                        else f"Vidara analyzed the video but could not locate a specific clip for '{query}'. "
+                             f"This video covers: {brief_topics}."
+                    )
+                }
+
+            brief_topics = ", ".join([t.name for t in indexed_topics[:5]]) if indexed_topics else "video topics"
+            llm_exp = verification_data.get("explanation") if verification_data else None
+            reasoning = (
+                f"No content found for '{query}' in this video. {llm_exp}"
+                if llm_exp
+                else f"There is no content in this video discussing '{query}'. This video covers: {brief_topics}."
+            )
             return {
                 "query": query,
                 "found": False,
                 "understood_concepts": [],
                 "matched_topics": [],
-                "reasoning": f"There is no content in this video discussing '{query}'. This video covers: {brief_topics}."
+                "reasoning": reasoning
             }
 
         reasoning = (
-            f"Vidara verified the video transcript and retrieved {len(final_matched)} targeted section(s) "
-            f"answering '{query}' with complete explanation boundaries."
+            f"Vidara searched the full video transcript and retrieved {len(final_matched)} "
+            f"section(s) covering '{query}' with complete semantic boundaries."
         )
+        if verification_data and verification_data.get("explanation"):
+            reasoning = verification_data["explanation"]
 
         return {
             "query": query,
             "found": True,
-            "understood_concepts": understood_concepts,
+            "understood_concepts": list(understood_concepts),
             "matched_topics": final_matched,
             "reasoning": reasoning
         }

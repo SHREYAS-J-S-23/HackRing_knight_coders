@@ -300,20 +300,66 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   async function runAnalysisPipeline(videoId, duration) {
-    setProcessing(true, "Transcribing with Whisper Large-v3...", "Generating word-level millisecond timestamps on Groq LPUs...", 45, 'transcribe');
+    setProcessing(true, "Transcribing with Whisper Large-v3...", "Generating word-level millisecond timestamps on Groq LPUs...", 20, 'transcribe');
     updateStepIndicator(2);
     setStagePill('transcribe');
 
-    const analyzeRes = await fetch(`${state.apiBase}/api/videos/${videoId}/analyze`, {
+    // STEP 1: Fire the analyze request — returns immediately (202 queued or 200 already-indexed)
+    const kickoffRes = await fetch(`${state.apiBase}/api/videos/${videoId}/analyze`, {
       method: 'POST'
     });
-
-    if (!analyzeRes.ok) {
-      const errMsg = await parseErrorResponse(analyzeRes, "Video transcription & indexing failed");
+    if (!kickoffRes.ok) {
+      const errMsg = await parseErrorResponse(kickoffRes, "Video analysis kickoff failed");
       throw new Error(errMsg);
     }
+    const kickoffData = await kickoffRes.json();
 
-    const analyzeData = await analyzeRes.json();
+    // If the video was already indexed in a previous run, skip polling
+    let analyzeData = null;
+    if (kickoffData.status === 'success' && kickoffData.already_indexed) {
+      analyzeData = kickoffData;
+    } else {
+      // STEP 2: Poll /status until the background job completes
+      analyzeData = await new Promise((resolve, reject) => {
+        const poller = setInterval(async () => {
+          try {
+            const sRes = await fetch(`${state.apiBase}/api/videos/${videoId}/status`);
+            if (!sRes.ok) return;
+            const sData = await sRes.json();
+
+            // Live progress display
+            const stage = sData.stage || 'Processing';
+            const msg = sData.message || 'Processing video intelligence...';
+            const progress = Math.max(20, sData.progress || 30);
+            setProcessing(true, `${stage}...`, msg, progress, 'transcribe');
+
+            if (sData.status === 'completed') {
+              clearInterval(poller);
+              // STEP 3: Fetch the full result once done
+              try {
+                const resultRes = await fetch(`${state.apiBase}/api/videos/${videoId}/analyze-result`);
+                if (!resultRes.ok) {
+                  const errText = await resultRes.text();
+                  reject(new Error(`Result fetch failed: ${errText}`));
+                  return;
+                }
+                const resultData = await resultRes.json();
+                resolve(resultData);
+              } catch (e) {
+                reject(e);
+              }
+            } else if (sData.status === 'failed') {
+              clearInterval(poller);
+              reject(new Error(sData.message || 'Analysis pipeline failed'));
+            }
+          } catch (e) {
+            // Network hiccup — keep polling
+          }
+        }, 1500);
+      });
+    }
+
+    // analyzeData now holds the full result — same shape as before
     state.coreThesis = analyzeData.core_thesis;
     if (coreThesisText) coreThesisText.textContent = state.coreThesis;
 

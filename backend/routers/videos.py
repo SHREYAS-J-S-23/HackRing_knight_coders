@@ -246,13 +246,21 @@ async def ingest_video_url(
         raise HTTPException(status_code=400, detail=f"Failed to ingest video from link: {str(e)}")
 
 
-@router.post("/videos/{video_id}/analyze")
-async def analyze_video(video_id: str):
+def _run_analysis_pipeline(video_id: str) -> None:
     """
-    Step 2: Transcribes audio with Whisper, segments dialogue, and builds semantic index.
-    Index once, query many times!
+    Internal background worker: Transcribes audio with Whisper, builds semantic index.
+    Runs outside the request context so the HTTP response is not blocked.
     """
-    session = get_session_data(video_id)
+    import copy
+    session = VIDEO_CACHE.get(video_id) or {}
+
+    # Reload from DB if not in cache
+    if not session:
+        try:
+            session = get_session_data(video_id)
+        except Exception:
+            return
+
     audio_path = Path(session["audio_path"])
 
     DatabaseService.set_job(
@@ -269,6 +277,7 @@ async def analyze_video(video_id: str):
         stt = GroqSTTService()
         transcript = stt.transcribe(audio_path, video_id, session["duration"])
         session["transcript"] = transcript
+        VIDEO_CACHE[video_id] = session
 
         # Save transcript segments to DB
         segments_data = [
@@ -284,17 +293,39 @@ async def analyze_video(video_id: str):
         ]
         DatabaseService.save_segments(video_id, segments_data)
 
+        DatabaseService.set_job(
+            job_id=f"job_{video_id}",
+            video_id=video_id,
+            job_type="indexing",
+            status="processing",
+            progress=65,
+            stage="Building Semantic Graph",
+            message=f"Transcribed {len(transcript.segments)} segments. Building Intent Graph..."
+        )
+
         # Build Core Thesis using SemanticEngine
         sem_engine = SemanticEngine()
         intent_graph = sem_engine.build_intent_graph(transcript)
         session["intent_graph"] = intent_graph
+        VIDEO_CACHE[video_id] = session
         DatabaseService.update_video_status(video_id, "indexed", core_thesis=intent_graph.core_thesis)
+
+        DatabaseService.set_job(
+            job_id=f"job_{video_id}",
+            video_id=video_id,
+            job_type="indexing",
+            status="processing",
+            progress=85,
+            stage="Discovering Key Moments",
+            message="Evaluating podcast exchanges, takeaways & topic boundaries..."
+        )
 
         # Pre-seed and persist topics immediately from Intent Graph themes
         topic_engine = VidaraTopicIntelligenceEngine()
         themes = intent_graph.themes if hasattr(intent_graph, "themes") else []
         discovered_topics = topic_engine.discover_important_topics(transcript, intent_graph.core_thesis, themes=themes)
         session["topics"] = discovered_topics
+        VIDEO_CACHE[video_id] = session
         DatabaseService.save_topics(video_id, [t.model_dump() for t in discovered_topics])
 
         DatabaseService.set_job(
@@ -304,17 +335,15 @@ async def analyze_video(video_id: str):
             status="completed",
             progress=100,
             stage="Semantic Index Built",
-            message=f"Indexed {len(transcript.segments)} segments & discovered {len(discovered_topics)} topics."
+            message=f"Indexed {len(transcript.segments)} segments & discovered {len(discovered_topics)} topics.",
+            result={
+                "core_thesis": intent_graph.core_thesis,
+                "segment_count": len(transcript.segments),
+                "topic_count": len(discovered_topics),
+                "topics": [t.model_dump() for t in discovered_topics]
+            }
         )
 
-        return {
-            "status": "success",
-            "video_id": video_id,
-            "core_thesis": intent_graph.core_thesis,
-            "segment_count": len(transcript.segments),
-            "topic_count": len(discovered_topics),
-            "topics": [t.model_dump() for t in discovered_topics]
-        }
     except Exception as e:
         DatabaseService.set_job(
             job_id=f"job_{video_id}",
@@ -326,7 +355,140 @@ async def analyze_video(video_id: str):
             message=str(e),
             error=str(e)
         )
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+
+@router.post("/videos/{video_id}/analyze")
+async def analyze_video(video_id: str, background_tasks: BackgroundTasks):
+    """
+    Step 2: Kicks off background transcription + semantic indexing and returns immediately.
+    Poll /videos/{video_id}/status to track progress.
+    Once status is 'completed', fetch full results from /videos/{video_id}/analyze-result.
+    """
+    session = get_session_data(video_id)
+
+    # If already completed (re-run guard), return result directly
+    job = DatabaseService.get_job(f"job_{video_id}")
+
+    # Guard 1: job record with result payload (from new runs that store result)
+    if job and job.get("status") == "completed" and job.get("result"):
+        result = job["result"]
+        return {
+            "status": "success",
+            "video_id": video_id,
+            "already_indexed": True,
+            **result
+        }
+
+    # Guard 2: transcript already in cache/session (in-memory fast path)
+    if session.get("transcript"):
+        topics = session.get("topics") or [t for t in DatabaseService.get_topics(video_id)]
+        thesis = ""
+        ig = session.get("intent_graph")
+        if ig:
+            thesis = ig.core_thesis
+        if not thesis:
+            vid = DatabaseService.get_video(video_id)
+            thesis = (vid or {}).get("core_thesis", "")
+        return {
+            "status": "success",
+            "video_id": video_id,
+            "already_indexed": True,
+            "core_thesis": thesis,
+            "segment_count": len(session["transcript"].segments) if hasattr(session["transcript"], "segments") else 0,
+            "topic_count": len(topics),
+            "topics": [t.model_dump() if hasattr(t, "model_dump") else t for t in topics]
+        }
+
+    # Guard 3: segments already in DB (e.g., server restarted but DB is persistent)
+    existing_segs = DatabaseService.get_segments(video_id)
+    if existing_segs and len(existing_segs) > 0:
+        existing_topics = DatabaseService.get_topics(video_id)
+        vid = DatabaseService.get_video(video_id)
+        return {
+            "status": "success",
+            "video_id": video_id,
+            "already_indexed": True,
+            "core_thesis": (vid or {}).get("core_thesis", ""),
+            "segment_count": len(existing_segs),
+            "topic_count": len(existing_topics),
+            "topics": existing_topics
+        }
+
+    # Guard 4: already running — don't double-queue
+    if job and job.get("status") in ("queued", "processing"):
+        return {
+            "status": "queued",
+            "video_id": video_id,
+            "message": "Analysis already in progress. Poll /api/videos/{video_id}/status for progress."
+        }
+
+    # Mark as queued
+    DatabaseService.set_job(
+        job_id=f"job_{video_id}",
+        video_id=video_id,
+        job_type="transcription",
+        status="queued",
+        progress=10,
+        stage="Queued",
+        message="Analysis pipeline queued. Starting Whisper transcription..."
+    )
+
+    # Kick off the heavy work in the background
+    background_tasks.add_task(_run_analysis_pipeline, video_id)
+
+    return {
+        "status": "queued",
+        "video_id": video_id,
+        "message": "Analysis started in background. Poll /api/videos/{video_id}/status for progress."
+    }
+
+
+@router.get("/videos/{video_id}/analyze-result")
+async def get_analyze_result(video_id: str):
+    """
+    Returns the full analysis result (topics, core_thesis, segment_count) once the pipeline is done.
+    Returns 202 if still processing, 200 with data when complete.
+    """
+    job = DatabaseService.get_job(f"job_{video_id}")
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis job not found. Did you call /analyze first?")
+
+    status = job.get("status", "")
+    if status == "failed":
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {job.get('message', 'Unknown error')}")
+
+    if status != "completed":
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": status,
+                "progress": job.get("progress", 0),
+                "stage": job.get("current_stage", "Processing"),
+                "message": job.get("message", "Still processing...")
+            }
+        )
+
+    # Completed — try to get result from job record first, then rebuild from DB
+    result = job.get("result") or {}
+    if not result.get("topics"):
+        topics_raw = DatabaseService.get_topics(video_id)
+        result["topics"] = topics_raw
+        result["topic_count"] = len(topics_raw)
+
+    if not result.get("core_thesis"):
+        vid = DatabaseService.get_video(video_id)
+        result["core_thesis"] = (vid or {}).get("core_thesis", "")
+
+    if not result.get("segment_count"):
+        segs = DatabaseService.get_segments(video_id)
+        result["segment_count"] = len(segs)
+
+    return {
+        "status": "success",
+        "video_id": video_id,
+        **result
+    }
 
 
 @router.post("/videos/{video_id}/discover-topics")
@@ -337,8 +499,8 @@ async def discover_topics(video_id: str):
     """
     session = get_session_data(video_id)
     if not session.get("transcript"):
-        # Auto-run analysis if not yet indexed
-        await analyze_video(video_id)
+        # Auto-run analysis inline (blocking) so we have a transcript before proceeding
+        _run_analysis_pipeline(video_id)
         session = get_session_data(video_id)
 
     transcript = session.get("transcript")
@@ -393,7 +555,8 @@ async def query_video(video_id: str, req: UserQueryRequest):
     """
     session = get_session_data(video_id)
     if not session.get("transcript"):
-        await analyze_video(video_id)
+        # Run analysis inline (blocking) so we have a transcript before querying
+        _run_analysis_pipeline(video_id)
         session = get_session_data(video_id)
 
     engine = VidaraTopicIntelligenceEngine()

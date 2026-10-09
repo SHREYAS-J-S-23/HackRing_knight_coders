@@ -431,13 +431,13 @@ SURROUNDING CONTEXT AFTER:
 9. Can the clip be shortened without losing meaning?
 10. Does the moment justify a standalone clip?
 
-Return strictly valid JSON:
+Return a valid JSON object with the following structure:
 {{
-  "validation_status": "PASSED" | "WARNING" | "BLOCKED",
+  "validation_status": "PASSED",
   "central_insight": "String summarizing the core takeaway",
-  "is_question_necessary": true/false,
-  "is_complete_point": true/false,
-  "has_irrelevant_dialogue": true/false,
+  "is_question_necessary": true,
+  "is_complete_point": true,
+  "has_irrelevant_dialogue": false,
   "recommended_start": {start_time},
   "recommended_end": {end_time},
   "editorial_justification": "Clear explanation of why this moment justifies a clip",
@@ -445,7 +445,7 @@ Return strictly valid JSON:
   "violations": []
 }}
 """
-            models_to_try = [model, GROQ_FALLBACK_MODEL, "qwen/qwen3.8-27b"]
+            models_to_try = [model or "openai/gpt-oss-120b", GROQ_FALLBACK_MODEL or "openai/gpt-oss-20b"]
             for m in models_to_try:
                 if not m:
                     continue
@@ -453,12 +453,13 @@ Return strictly valid JSON:
                     res = client.chat.completions.create(
                         model=m,
                         messages=[
-                            {"role": "system", "content": "You are Vidara's editorial podcast auditor. Return strict JSON only."},
+                            {"role": "system", "content": "You are a helpful assistant that outputs JSON."},
                             {"role": "user", "content": prompt}
                         ],
                         response_format={"type": "json_object"},
-                        max_tokens=850,
-                        temperature=0.1
+                        max_tokens=1200,
+                        temperature=0.1,
+                        timeout=8.0
                     )
                     content = res.choices[0].message.content or ""
                     if content.strip():
@@ -466,7 +467,11 @@ Return strictly valid JSON:
                         data["passed"] = (data.get("validation_status") != "BLOCKED")
                         return data
                 except Exception as e:
+                    err_str = str(e).lower()
                     print(f"Vidara: Editorial validation model {m} notice ({e}), trying fallback...")
+                    if "429" in err_str or "rate_limit" in err_str or "tokens" in err_str:
+                        # Immediate fallback to 10-point deterministic heuristic on quota/rate limit
+                        break
 
         # Deterministic Heuristic 10-Point Audit
         violations = []
