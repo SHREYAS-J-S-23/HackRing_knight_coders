@@ -10,6 +10,9 @@
 
 ---
 
+
+
+
 ## 🌟 Overview
 
 **Vidara AI** is a state-of-the-art video and podcast intelligence platform built for long-form video comprehension (1–2hr+ podcasts, keynotes, university lectures, and founder interviews). It solves the fundamental problem of traditional video clipping tools: extracting clips that are either too long, filled with rambling banter, or missing the critical question that gives a guest's answer its meaning.
