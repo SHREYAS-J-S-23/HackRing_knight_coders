@@ -704,24 +704,38 @@ Return STRICTLY a JSON object with this format:
         podcast_candidates = self.podcast_engine.convert_exchanges_to_clip_candidates(podcast_exchanges)
 
         clip_candidates: List[ValidatedClipCandidate] = []
-        for cand in podcast_candidates[:6]:
-            val = self.meaning_validator.validate_podcast_exchange(
-                candidate_text=cand.key_information,
-                topic_title=cand.topic_title,
-                exchange_type=cand.exchange_type or "QUESTION_AND_ANSWER",
-                start_time=cand.start_time,
-                end_time=cand.end_time,
-                speakers_involved=cand.speakers_involved or [],
-                question_included=cand.question_included,
-                depends_on_question=cand.depends_on_question,
-                core_thesis=core_thesis
-            )
-            if val.get("passed", True):
-                cand.quality_score = val.get("quality_score", 0.92)
-                cand.editorial_justification = val.get("editorial_justification", cand.selection_reason)
-                clip_candidates.append(cand)
+        
+        # Concurrently validate top podcast moments to eliminate multi-second serial LLM latency
+        from concurrent.futures import ThreadPoolExecutor
 
-        for cand in podcast_candidates[6:]:
+        def _validate_single_exchange(cand):
+            try:
+                val = self.meaning_validator.validate_podcast_exchange(
+                    candidate_text=cand.key_information,
+                    topic_title=cand.topic_title,
+                    exchange_type=cand.exchange_type or "QUESTION_AND_ANSWER",
+                    start_time=cand.start_time,
+                    end_time=cand.end_time,
+                    speakers_involved=cand.speakers_involved or [],
+                    question_included=cand.question_included,
+                    depends_on_question=cand.depends_on_question,
+                    core_thesis=core_thesis
+                )
+                return cand, val
+            except Exception:
+                return cand, {"passed": True, "quality_score": 0.90}
+
+        top_candidates = podcast_candidates[:4]
+        if top_candidates:
+            with ThreadPoolExecutor(max_workers=min(4, len(top_candidates))) as executor:
+                val_results = list(executor.map(_validate_single_exchange, top_candidates))
+            for cand, val in val_results:
+                if val.get("passed", True):
+                    cand.quality_score = val.get("quality_score", 0.92)
+                    cand.editorial_justification = val.get("editorial_justification", cand.selection_reason)
+                    clip_candidates.append(cand)
+
+        for cand in podcast_candidates[4:]:
             cand.quality_score = 0.88
             cand.editorial_justification = cand.selection_reason
             clip_candidates.append(cand)

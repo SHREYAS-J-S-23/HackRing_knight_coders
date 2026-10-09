@@ -241,6 +241,7 @@ class TopicDiscoveryResponse(BaseModel):
 class IngestUrlRequest(BaseModel):
     url: str
     groq_api_key: Optional[str] = None
+    audience_mode: Optional[str] = "education"
 
 class UserQueryRequest(BaseModel):
     query: str
@@ -267,3 +268,20 @@ class VideoStatusResponse(BaseModel):
     progress: int
     current_stage: str
     message: str
+
+class ClipNotesRequest(BaseModel):
+    audience_mode: Optional[str] = "education"
+
+class ClipNotesResponse(BaseModel):
+    clip_id: str
+    video_id: Optional[str] = None
+    audience_mode: str
+    clip_title: str
+    clip_summary: str
+    key_points: List[str] = []
+    sections: dict = {}
+    source_start: float
+    source_end: float
+    generation_status: str = "completed"
+    model_metadata: Optional[dict] = None
+

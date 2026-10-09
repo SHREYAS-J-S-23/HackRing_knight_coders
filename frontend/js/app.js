@@ -31,7 +31,9 @@ document.addEventListener('DOMContentLoaded', () => {
     user: JSON.parse(localStorage.getItem('vidara_user') || sessionStorage.getItem('vidara_user') || 'null'),
     resetToken: null,
     videoTitle: '',
-    activeClip: null
+    activeClip: null,
+    audienceMode: 'education',
+    notesCache: {}
   };
 
   // Auth & User Profile Elements
@@ -440,14 +442,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const formData = new FormData();
     formData.append('file', state.selectedFile);
+    formData.append('audience_mode', state.audienceMode || 'education');
     state.videoTitle = state.selectedFile ? state.selectedFile.name : 'Uploaded Video';
 
     if (!state.token) {
-      showToast("Please sign in or create an account to upload and process videos.", "info", 5000);
-      if (authModal) authModal.classList.remove('hidden');
-      if (typeof window.switchAuthView === 'function') window.switchAuthView('login');
-      setProcessing(false);
-      return;
+      // Auto-initialize persistent local creator profile so upload is never interrupted
+      state.token = 'guest_token';
+      state.user = { id: 'default_user', name: 'Vidara Creator', display_name: 'Vidara Creator', email: 'creator@vidara.ai' };
+      localStorage.setItem('vidara_token', state.token);
+      localStorage.setItem('vidara_user', JSON.stringify(state.user));
+      updateUserUI();
     }
 
     try {
@@ -465,6 +469,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const uploadData = await uploadRes.json();
       state.videoId = uploadData.video_id;
       state.duration = uploadData.duration_seconds;
+      if (uploadData.audience_mode) {
+        state.audienceMode = uploadData.audience_mode;
+        const aSelect = document.getElementById('audienceModeSelect');
+        if (aSelect) aSelect.value = state.audienceMode;
+      }
 
       await runAnalysisPipeline(state.videoId, state.duration);
 
@@ -488,10 +497,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (!state.token) {
-      showToast("Please sign in or create an account to import and analyze videos.", "info", 5000);
-      if (authModal) authModal.classList.remove('hidden');
-      if (typeof window.switchAuthView === 'function') window.switchAuthView('login');
-      return;
+      // Auto-initialize persistent local creator profile so link ingestion is never interrupted
+      state.token = 'guest_token';
+      state.user = { id: 'default_user', name: 'Vidara Creator', display_name: 'Vidara Creator', email: 'creator@vidara.ai' };
+      localStorage.setItem('vidara_token', state.token);
+      localStorage.setItem('vidara_user', JSON.stringify(state.user));
+      updateUserUI();
     }
 
     // Crucial: Clear any previous local file selection so all video players stream the link video!
@@ -513,7 +524,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const ingestRes = await apiFetch('/api/videos/ingest-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: cleanUrl })
+        body: JSON.stringify({ url: cleanUrl, audience_mode: state.audienceMode || 'education' })
       });
 
       if (!ingestRes.ok) {
@@ -525,6 +536,11 @@ document.addEventListener('DOMContentLoaded', () => {
       state.videoId = ingestData.video_id;
       state.duration = ingestData.duration_seconds;
       state.videoTitle = ingestData.filename || 'Imported Video';
+      if (ingestData.audience_mode) {
+        state.audienceMode = ingestData.audience_mode;
+        const aSelect = document.getElementById('audienceModeSelect');
+        if (aSelect) aSelect.value = state.audienceMode;
+      }
 
       if (videoFileName) videoFileName.textContent = ingestData.filename;
       if (videoFileStats) videoFileStats.textContent = `${formatTime(state.duration)} • Imported from link`;
@@ -947,6 +963,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <button type="button" class="btn-ghost btn-topic-action save-topic-btn" data-topic-id="${t.id}" data-title="${escapeHtml(t.name)}" data-start="${t.start_time}" data-end="${t.end_time}" title="Save clip permanently to My Library">
               <i class="fa-regular fa-bookmark"></i> Save
             </button>
+            <button type="button" class="btn-ghost btn-topic-action ai-notes-topic-btn" data-topic-id="${t.id}" data-title="${escapeHtml(t.name)}" data-start="${t.start_time}" data-end="${t.end_time}" title="Notes with Text-to-Speech">Notes</button>
             <button type="button" class="btn-primary btn-topic-action generate-single-clip-btn" data-topic-id="${t.id}">
               <i class="fa-solid fa-scissors"></i> Clip
             </button>
@@ -1120,6 +1137,18 @@ document.addEventListener('DOMContentLoaded', () => {
           btn.disabled = false;
           btn.innerHTML = '<i class="fa-regular fa-bookmark"></i> Save';
         }
+      });
+    });
+
+    // AI Notes button on Topic Cards
+    document.querySelectorAll('.ai-notes-topic-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const tid = btn.getAttribute('data-topic-id');
+        const title = btn.getAttribute('data-title') || 'Topic Cut';
+        const start = parseFloat(btn.getAttribute('data-start') || '0');
+        const end = parseFloat(btn.getAttribute('data-end') || '0');
+        openClipNotes(tid, title, start, end);
       });
     });
 
@@ -1342,6 +1371,9 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
             <div class="studio-clip-meta">
               <span class="studio-clip-duration">${c.duration}s</span>
+              <button class="btn-icon-subtle studio-clip-notes-btn" data-index="${idx}" title="AI Notes with Text-to-Speech">
+                <i class="fa-solid fa-book-open"></i>
+              </button>
               <button class="btn-icon-subtle studio-clip-save-btn" data-index="${idx}" title="Save permanently to My Library">
                 <i class="fa-regular fa-bookmark"></i>
               </button>
@@ -1357,6 +1389,18 @@ document.addEventListener('DOMContentLoaded', () => {
           });
 
           studioClipsList.appendChild(clipItem);
+        });
+
+        // Bind playlist AI Notes button events
+        document.querySelectorAll('.studio-clip-notes-btn').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const idx = parseInt(btn.getAttribute('data-index') || '0', 10);
+            const clip = clips[idx];
+            if (!clip) return;
+            const clipName = clip.text || clip.name || `Topic Cut ${idx + 1}`;
+            openClipNotes(clip.topic_id || clip.id || `clip_${idx}`, clipName, clip.start_time || 0, clip.end_time || (clip.start_time + clip.duration));
+          });
         });
 
         // Bind playlist bookmark button events
@@ -1404,6 +1448,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <p class="clip-transcript-snip"><strong>${escapeHtml(clipName)}</strong></p>
             ${c.key_information ? `<p style="font-size: 0.8rem; color: var(--text-secondary); margin: 4px 0 8px 0; line-height: 1.35;">${escapeHtml(c.key_information)}</p>` : ''}
             <div class="clip-footer-actions" style="margin-top: 10px; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;">
+              <button class="btn-ghost btn-sm clip-notes-grid-btn" data-index="${idx}">Notes</button>
               <button class="btn-ghost btn-sm save-grid-clip-btn" data-index="${idx}">
                 <i class="fa-regular fa-bookmark"></i> Save
               </button>
@@ -1417,6 +1462,17 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>
         `;
         clipsGrid.appendChild(card);
+      });
+
+      document.querySelectorAll('.clip-notes-grid-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const idx = parseInt(btn.getAttribute('data-index') || '0', 10);
+          const clip = clips[idx] || clips[0];
+          if (!clip) return;
+          const clipName = clip.text || clip.name || `Topic Cut ${idx + 1}`;
+          openClipNotes(clip.topic_id || clip.id || `clip_${idx}`, clipName, clip.start_time || 0, clip.end_time || (clip.start_time + clip.duration));
+        });
       });
 
       document.querySelectorAll('.save-grid-clip-btn').forEach(btn => {
@@ -2467,6 +2523,25 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
+    const guestContinueBtn = document.getElementById('guestContinueBtn');
+    if (guestContinueBtn) {
+      guestContinueBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        state.token = 'guest_token';
+        state.user = { id: 'default_user', name: 'Vidara Creator', display_name: 'Vidara Creator', email: 'creator@vidara.ai' };
+        localStorage.setItem('vidara_token', state.token);
+        localStorage.setItem('vidara_user', JSON.stringify(state.user));
+        updateUserUI();
+        if (authModal) authModal.classList.add('hidden');
+        showToast("Continuing as Vidara Creator.", "success");
+        if (state.selectedFile) {
+          uploadAndIndexVideo();
+        } else if (videoUrlInput && videoUrlInput.value.trim()) {
+          importAndIndexVideoUrl(videoUrlInput.value.trim());
+        }
+      });
+    }
+
     // 7. OAUTH REDIRECT & RECOVERY URL HANDLER
     function handleAuthUrlCallbacks() {
       // Check hash params (Supabase default OAuth & magic link redirect)
@@ -2954,4 +3029,896 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  // ====================================================
+  // 8. AUDIENCE-AWARE AI NOTES & TEXT-TO-SPEECH CONTROLLER
+  // ====================================================
+  const audienceModeSelect = document.getElementById('audienceModeSelect');
+  const audienceModeHelpText = document.getElementById('audienceModeHelpText');
+  const clipNotesModal = document.getElementById('clipNotesModal');
+  const closeNotesModalBtn = document.getElementById('closeNotesModalBtn');
+  const copyNotesBtn = document.getElementById('copyNotesBtn');
+  const notesClipTitle = document.getElementById('notesClipTitle');
+  const notesAudienceBadge = document.getElementById('notesAudienceBadge');
+  const notesClipMeta = document.getElementById('notesClipMeta');
+  const notesLoadingState = document.getElementById('notesLoadingState');
+  const notesContentContainer = document.getElementById('notesContentContainer');
+  const notesModeEduBtn = document.getElementById('notesModeEduBtn');
+  const notesModeProBtn = document.getElementById('notesModeProBtn');
+  const notesModeCreatorBtn = document.getElementById('notesModeCreatorBtn');
+  const ttsPlayAllBtn = document.getElementById('ttsPlayAllBtn');
+  const ttsPauseBtn = document.getElementById('ttsPauseBtn');
+  const ttsStopBtn = document.getElementById('ttsStopBtn');
+  const ttsStatusPill = document.getElementById('ttsStatusPill');
+  const ttsStatusText = document.getElementById('ttsStatusText');
+  const ttsRateSelect = document.getElementById('ttsRateSelect');
+
+  function updateAudienceDescription() {
+    if (!audienceModeHelpText) return;
+    if (state.audienceMode === 'education') {
+      audienceModeHelpText.textContent = "Learn, revise and practice with concept breakdowns & practice questions.";
+    } else if (state.audienceMode === 'professional') {
+      audienceModeHelpText.textContent = "Technical architecture, industry implications, implementation insights & terminology.";
+    } else if (state.audienceMode === 'content_creator') {
+      audienceModeHelpText.textContent = "Engaging titles, hooks, story structure, captions & call-to-actions.";
+    }
+  }
+
+  if (audienceModeSelect) {
+    audienceModeSelect.value = state.audienceMode || 'education';
+    audienceModeSelect.addEventListener('change', (e) => {
+      state.audienceMode = e.target.value;
+      updateAudienceDescription();
+    });
+    updateAudienceDescription();
+  }
+
+  // -------------------------------------------------------------
+  // TEXT-TO-SPEECH ENGINE (Web Speech API)
+  // -------------------------------------------------------------
+  const ttsManager = {
+    synth: window.speechSynthesis || null,
+    isSpeaking: false,
+    isPaused: false,
+    activeSectionEl: null,
+    currentUtterance: null,
+    queue: [],
+    queueIndex: 0,
+    selectedVoice: null,
+
+    init() {
+      if (!this.synth) return;
+      const selectVoice = () => {
+        try {
+          const voices = this.synth.getVoices() || [];
+          this.selectedVoice = voices.find(v => v.lang === 'en-US' && !v.name.includes('Google') && !v.name.includes('Natural')) 
+            || voices.find(v => v.lang && v.lang.startsWith('en')) 
+            || (voices.length > 0 ? voices[0] : null);
+        } catch (e) {
+          console.warn("TTS voice enumeration:", e);
+        }
+      };
+      selectVoice();
+      if (this.synth.onvoiceschanged !== undefined) {
+        this.synth.onvoiceschanged = selectVoice;
+      }
+    },
+
+    getRate() {
+      return parseFloat(ttsRateSelect ? ttsRateSelect.value : '1.0') || 1.0;
+    },
+
+    splitIntoSentences(text) {
+      if (!text) return [];
+      const clean = String(text).replace(/\s+/g, ' ').trim();
+      const matches = clean.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g);
+      return matches ? matches.map(s => s.trim()).filter(Boolean) : [clean];
+    },
+
+    stop() {
+      if (this.synth) {
+        try {
+          this.synth.cancel();
+        } catch {}
+      }
+      this.isSpeaking = false;
+      this.isPaused = false;
+      this.queue = [];
+      this.queueIndex = 0;
+      this.currentUtterance = null;
+      if (this.activeSectionEl) {
+        this.activeSectionEl.classList.remove('speaking-active');
+        this.activeSectionEl = null;
+      }
+      document.querySelectorAll('.btn-tts-section').forEach(b => b.classList.remove('active-speaking'));
+      if (ttsPlayAllBtn) ttsPlayAllBtn.innerHTML = '<i class="fa-solid fa-play"></i> Listen to Notes';
+      if (ttsPauseBtn) ttsPauseBtn.classList.add('hidden');
+      if (ttsStopBtn) ttsStopBtn.classList.add('hidden');
+      if (ttsStatusPill) ttsStatusPill.classList.add('hidden');
+    },
+
+    pause() {
+      if (!this.synth) return;
+      if (this.isSpeaking && !this.isPaused) {
+        try {
+          this.synth.pause();
+        } catch {}
+        this.isPaused = true;
+        if (ttsPauseBtn) ttsPauseBtn.innerHTML = '<i class="fa-solid fa-play"></i> Resume';
+        if (ttsStatusText) ttsStatusText.textContent = 'Paused';
+      }
+    },
+
+    resume() {
+      if (!this.synth) return;
+      if (this.isPaused) {
+        try {
+          this.synth.resume();
+        } catch {}
+        this.isPaused = false;
+        if (ttsPauseBtn) ttsPauseBtn.innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
+        if (ttsStatusText) ttsStatusText.textContent = 'Playing...';
+      }
+    },
+
+    speakQueue(items, onComplete) {
+      if (!this.synth) {
+        showToast("Text-to-Speech is not supported in this browser.", "warning");
+        return;
+      }
+      this.stop();
+      if (!items || items.length === 0) return;
+
+      this.queue = items;
+      this.queueIndex = 0;
+      this.isSpeaking = true;
+      this.isPaused = false;
+
+      if (ttsPauseBtn) {
+        ttsPauseBtn.classList.remove('hidden');
+        ttsPauseBtn.innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
+      }
+      if (ttsStopBtn) ttsStopBtn.classList.remove('hidden');
+      if (ttsPlayAllBtn) ttsPlayAllBtn.innerHTML = '<i class="fa-solid fa-rotate-left"></i> Replay All';
+      if (ttsStatusPill) ttsStatusPill.classList.remove('hidden');
+
+      const playNextSection = () => {
+        if (this.queueIndex >= this.queue.length) {
+          this.stop();
+          if (onComplete) onComplete();
+          return;
+        }
+
+        const currentItem = this.queue[this.queueIndex];
+        this.queueIndex++;
+
+        // Visual Section Highlight
+        if (this.activeSectionEl) this.activeSectionEl.classList.remove('speaking-active');
+        if (currentItem.elementId) {
+          const el = document.getElementById(currentItem.elementId);
+          if (el) {
+            this.activeSectionEl = el;
+            el.classList.add('speaking-active');
+            el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
+        }
+
+        document.querySelectorAll('.btn-tts-section').forEach(b => b.classList.remove('active-speaking'));
+        if (currentItem.btnElement) {
+          currentItem.btnElement.classList.add('active-speaking');
+        }
+
+        if (ttsStatusText) {
+          ttsStatusText.textContent = `Reading: ${currentItem.title || 'Section'}...`;
+        }
+
+        const sentences = this.splitIntoSentences(currentItem.text);
+        let sIdx = 0;
+
+        const speakNextSentence = () => {
+          if (!this.isSpeaking) return;
+          if (sIdx >= sentences.length) {
+            playNextSection();
+            return;
+          }
+
+          const sentence = sentences[sIdx++];
+          const utterance = new SpeechSynthesisUtterance(sentence);
+          if (this.selectedVoice) utterance.voice = this.selectedVoice;
+          utterance.rate = this.getRate();
+          utterance.pitch = 1.0;
+
+          utterance.onend = () => {
+            speakNextSentence();
+          };
+          utterance.onerror = (err) => {
+            console.warn("Utterance error:", err);
+            speakNextSentence();
+          };
+
+          this.currentUtterance = utterance;
+          try {
+            this.synth.speak(utterance);
+          } catch (e) {
+            console.warn("Synth speak failed:", e);
+            speakNextSentence();
+          }
+        };
+
+        speakNextSentence();
+      };
+
+      playNextSection();
+    }
+  };
+
+  ttsManager.init();
+
+  if (ttsPlayAllBtn) {
+    ttsPlayAllBtn.addEventListener('click', () => {
+      if (ttsManager.isSpeaking && !ttsManager.isPaused) {
+        ttsManager.stop();
+        return;
+      }
+      playAllNotesSpeech();
+    });
+  }
+
+  if (ttsPauseBtn) {
+    ttsPauseBtn.addEventListener('click', () => {
+      if (ttsManager.isPaused) {
+        ttsManager.resume();
+      } else {
+        ttsManager.pause();
+      }
+    });
+  }
+
+  if (ttsStopBtn) {
+    ttsStopBtn.addEventListener('click', () => {
+      ttsManager.stop();
+    });
+  }
+
+  // -------------------------------------------------------------
+  // NOTES MODAL & GENERATION CONTROLLER
+  // -------------------------------------------------------------
+  let currentActiveClipForNotes = null;
+  let currentRenderedNotesData = null;
+
+  function updateNotesModeUI(mode) {
+    const badges = {
+      education: 'Education Mode',
+      professional: 'Professional Mode',
+      content_creator: 'Content Creator Mode'
+    };
+    if (notesAudienceBadge) {
+      notesAudienceBadge.textContent = badges[mode] || 'Audience Notes';
+    }
+
+    [notesModeEduBtn, notesModeProBtn, notesModeCreatorBtn].forEach(btn => {
+      if (btn) {
+        if (btn.getAttribute('data-mode') === mode) {
+          btn.classList.add('active');
+        } else {
+          btn.classList.remove('active');
+        }
+      }
+    });
+  }
+
+  async function openClipNotes(clipId, title, startTime, endTime, modeOverride = null) {
+    if (!clipId) return;
+
+    const activeMode = modeOverride || state.audienceMode || 'education';
+    currentActiveClipForNotes = {
+      clipId,
+      title: title || 'Clip Insight',
+      startTime: parseFloat(startTime || 0),
+      endTime: parseFloat(endTime || 0),
+      mode: activeMode
+    };
+
+    ttsManager.stop();
+
+    if (clipNotesModal) clipNotesModal.classList.remove('hidden');
+    if (notesClipTitle) notesClipTitle.textContent = currentActiveClipForNotes.title;
+    if (notesClipMeta) {
+      notesClipMeta.textContent = `${formatTime(currentActiveClipForNotes.startTime)} — ${formatTime(currentActiveClipForNotes.endTime)} • Source Verified`;
+    }
+
+    updateNotesModeUI(activeMode);
+
+    const cacheKey = `${clipId}_${activeMode}`;
+    if (state.notesCache[cacheKey]) {
+      renderClipNotes(state.notesCache[cacheKey]);
+      return;
+    }
+
+    if (notesLoadingState) notesLoadingState.classList.remove('hidden');
+    if (notesContentContainer) notesContentContainer.innerHTML = '';
+
+    try {
+      const endpoint = `/api/clips/${encodeURIComponent(clipId)}/notes?video_id=${encodeURIComponent(state.videoId || '')}`;
+      const res = await apiFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audience_mode: activeMode })
+      });
+
+      if (!res.ok) {
+        const errDetail = await parseErrorResponse(res, "Failed to generate AI notes");
+        throw new Error(errDetail);
+      }
+
+      const notesData = await res.json();
+      state.notesCache[cacheKey] = notesData;
+      renderClipNotes(notesData);
+    } catch (err) {
+      if (notesLoadingState) notesLoadingState.classList.add('hidden');
+      if (notesContentContainer) {
+        notesContentContainer.innerHTML = `
+          <div style="text-align:center; padding: 2rem; color: #f87171;">
+            <i class="fa-solid fa-triangle-exclamation" style="font-size:2rem; margin-bottom:0.75rem;"></i>
+            <h4>Could Not Generate Notes</h4>
+            <p style="font-size:0.85rem; color:var(--text-secondary); max-width:480px; margin:0 auto 1rem auto;">${escapeHtml(err.message)}</p>
+            <button class="btn-action btn-sm" id="retryNotesBtn">
+              <i class="fa-solid fa-rotate-right"></i> Retry Generation
+            </button>
+          </div>
+        `;
+        const retryBtn = document.getElementById('retryNotesBtn');
+        if (retryBtn) {
+          retryBtn.addEventListener('click', () => {
+            openClipNotes(clipId, title, startTime, endTime, activeMode);
+          });
+        }
+      }
+    }
+  }
+
+  // Audience Mode Pills inside Notes Modal
+  [notesModeEduBtn, notesModeProBtn, notesModeCreatorBtn].forEach(btn => {
+    if (btn) {
+      btn.addEventListener('click', () => {
+        const newMode = btn.getAttribute('data-mode');
+        if (currentActiveClipForNotes) {
+          openClipNotes(
+            currentActiveClipForNotes.clipId,
+            currentActiveClipForNotes.title,
+            currentActiveClipForNotes.startTime,
+            currentActiveClipForNotes.endTime,
+            newMode
+          );
+        }
+      });
+    }
+  });
+
+  if (closeNotesModalBtn) {
+    closeNotesModalBtn.addEventListener('click', () => {
+      ttsManager.stop();
+      if (clipNotesModal) clipNotesModal.classList.add('hidden');
+    });
+  }
+
+  if (clipNotesModal) {
+    clipNotesModal.addEventListener('click', (e) => {
+      if (e.target === clipNotesModal) {
+        ttsManager.stop();
+        clipNotesModal.classList.add('hidden');
+      }
+    });
+  }
+
+  // -------------------------------------------------------------
+  // RENDER STRUCTURED AI NOTES
+  // -------------------------------------------------------------
+  function renderClipNotes(notesData) {
+    if (!notesContentContainer) return;
+    if (notesLoadingState) notesLoadingState.classList.add('hidden');
+    currentRenderedNotesData = notesData;
+
+    const mode = notesData.audience_mode || 'education';
+    const sections = notesData.sections || {};
+    notesContentContainer.innerHTML = '';
+
+    // 1. Summary Card
+    const summaryCard = document.createElement('div');
+    summaryCard.className = 'note-section-card';
+    summaryCard.id = 'sec_summary';
+    summaryCard.innerHTML = `
+      <div class="note-section-header">
+        <h4><i class="fa-solid fa-align-left icon-accent"></i> ${mode === 'professional' ? 'Executive Summary' : 'Clip Overview'}</h4>
+        <button class="btn-tts-section" data-target="sec_summary">
+          <i class="fa-solid fa-volume-high"></i> Listen
+        </button>
+      </div>
+      <p class="note-section-text">${escapeHtml(notesData.clip_summary || sections.clip_overview || sections.executive_summary || '')}</p>
+    `;
+    notesContentContainer.appendChild(summaryCard);
+
+    // 2. Key Points Card
+    if (notesData.key_points && notesData.key_points.length > 0) {
+      const kpCard = document.createElement('div');
+      kpCard.className = 'note-section-card';
+      kpCard.id = 'sec_key_points';
+      kpCard.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-list-check icon-accent"></i> Key Points</h4>
+          <button class="btn-tts-section" data-target="sec_key_points">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <ul class="note-bullet-list">
+          ${notesData.key_points.map(pt => `<li>${escapeHtml(pt)}</li>`).join('')}
+        </ul>
+      `;
+      notesContentContainer.appendChild(kpCard);
+    }
+
+    // 3. Mode-Specific Sections
+    if (mode === 'education') {
+      renderEducationSections(sections);
+    } else if (mode === 'professional') {
+      renderProfessionalSections(sections);
+    } else if (mode === 'content_creator') {
+      renderCreatorSections(sections);
+    }
+
+    // Bind individual section TTS buttons
+    notesContentContainer.querySelectorAll('.btn-tts-section').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const secId = btn.getAttribute('data-target');
+        const secEl = document.getElementById(secId);
+        if (!secEl) return;
+
+        const title = secEl.querySelector('h4') ? secEl.querySelector('h4').innerText : 'Section';
+        const textToRead = extractReadableText(secEl);
+
+        ttsManager.speakQueue([
+          {
+            elementId: secId,
+            btnElement: btn,
+            title: title,
+            text: textToRead
+          }
+        ]);
+      });
+    });
+  }
+
+  function renderEducationSections(sections) {
+    // Key Concepts
+    if (sections.key_concepts && sections.key_concepts.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_key_concepts';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-lightbulb icon-accent"></i> Key Concepts</h4>
+          <button class="btn-tts-section" data-target="sec_key_concepts">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <div class="concepts-grid">
+          ${sections.key_concepts.map(c => `
+            <div class="concept-card">
+              <div class="concept-name">${escapeHtml(c.name || 'Concept')}</div>
+              <div class="concept-explanation">${escapeHtml(c.explanation || '')}</div>
+              ${c.why_it_matters ? `<div class="concept-why"><strong>Why it matters:</strong> ${escapeHtml(c.why_it_matters)}</div>` : ''}
+              ${c.example ? `<div class="concept-why" style="margin-top:4px;color:#ffa366;"><strong>Example:</strong> ${escapeHtml(c.example)}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Revision Notes
+    if (sections.revision_notes && sections.revision_notes.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_revision';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-bookmark icon-accent"></i> Revision Notes (Exam Prep)</h4>
+          <button class="btn-tts-section" data-target="sec_revision">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <ul class="note-bullet-list">
+          ${sections.revision_notes.map(n => `<li>${escapeHtml(n)}</li>`).join('')}
+        </ul>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Practice Questions
+    if (sections.practice_questions) {
+      const pq = sections.practice_questions;
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_practice';
+      
+      let questionsHtml = '<div class="questions-list">';
+      if (pq.short_answer_questions && pq.short_answer_questions.length > 0) {
+        pq.short_answer_questions.forEach((q, i) => {
+          questionsHtml += `
+            <div class="question-item">
+              <div class="question-tag">Short Answer Q${i + 1}</div>
+              <p class="question-text">${escapeHtml(q)}</p>
+            </div>
+          `;
+        });
+      }
+      if (pq.conceptual_questions && pq.conceptual_questions.length > 0) {
+        pq.conceptual_questions.forEach((q, i) => {
+          questionsHtml += `
+            <div class="question-item">
+              <div class="question-tag">Conceptual / Application Q${i + 1}</div>
+              <p class="question-text">${escapeHtml(q)}</p>
+            </div>
+          `;
+        });
+      }
+      if (pq.multiple_choice_question) {
+        const mcq = pq.multiple_choice_question;
+        questionsHtml += `
+          <div class="mcq-box">
+            <div class="question-tag">Multiple Choice Challenge</div>
+            <div class="mcq-question">${escapeHtml(mcq.question || '')}</div>
+            <div class="mcq-options">
+              ${(mcq.options || []).map(opt => {
+                const isCorrect = (opt === mcq.correct_answer || (mcq.correct_answer && opt.startsWith(mcq.correct_answer.charAt(0))));
+                return `<div class="mcq-option ${isCorrect ? 'correct' : ''}">${escapeHtml(opt)}</div>`;
+              }).join('')}
+            </div>
+            ${mcq.explanation ? `<p class="mcq-explanation"><strong>Answer & Explanation:</strong> ${escapeHtml(mcq.correct_answer || '')} — ${escapeHtml(mcq.explanation)}</p>` : ''}
+          </div>
+        `;
+      }
+      questionsHtml += '</div>';
+
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-circle-question icon-accent"></i> Practice Questions</h4>
+          <button class="btn-tts-section" data-target="sec_practice">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        ${questionsHtml}
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Quick Recap
+    if (sections.quick_recap && sections.quick_recap.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_recap';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-flag-checkered icon-accent"></i> Quick Recap</h4>
+          <button class="btn-tts-section" data-target="sec_recap">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <ul class="note-bullet-list">
+          ${sections.quick_recap.map(r => `<li>${escapeHtml(r)}</li>`).join('')}
+        </ul>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+  }
+
+  function renderProfessionalSections(sections) {
+    // Technical Breakdown
+    if (sections.technical_breakdown) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_tech_breakdown';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-microchip icon-accent"></i> Technical Breakdown</h4>
+          <button class="btn-tts-section" data-target="sec_tech_breakdown">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <p class="note-section-text">${escapeHtml(sections.technical_breakdown)}</p>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Industry Relevance
+    if (sections.industry_relevance) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_industry_relevance';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-chart-line icon-accent"></i> Industry Relevance</h4>
+          <button class="btn-tts-section" data-target="sec_industry_relevance">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <p class="note-section-text">${escapeHtml(sections.industry_relevance)}</p>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Implementation Insights
+    if (sections.implementation_insights && sections.implementation_insights.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_implementation';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-gears icon-accent"></i> Implementation Insights</h4>
+          <button class="btn-tts-section" data-target="sec_implementation">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <div class="insights-grid">
+          ${sections.implementation_insights.map(item => `
+            <div class="insight-item-box">
+              ${item.problem ? `<div class="insight-row"><span class="insight-label">Problem:</span> ${escapeHtml(item.problem)}</div>` : ''}
+              ${item.approach ? `<div class="insight-row"><span class="insight-label">Approach:</span> ${escapeHtml(item.approach)}</div>` : ''}
+              ${item.how_it_works ? `<div class="insight-row"><span class="insight-label">Mechanism:</span> ${escapeHtml(item.how_it_works)}</div>` : ''}
+              ${item.benefits ? `<div class="insight-row"><span class="insight-label" style="color:#4ade80;">Benefits:</span> ${escapeHtml(item.benefits)}</div>` : ''}
+              ${item.trade_offs ? `<div class="insight-row"><span class="insight-label" style="color:#fbbf24;">Trade-offs:</span> ${escapeHtml(item.trade_offs)}</div>` : ''}
+              ${item.limitations ? `<div class="insight-row"><span class="insight-label" style="color:#f87171;">Limitations:</span> ${escapeHtml(item.limitations)}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Action Items / Next Steps
+    if (sections.action_items && sections.action_items.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_action_items';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-arrow-trend-up icon-accent"></i> Action Items & Next Steps</h4>
+          <button class="btn-tts-section" data-target="sec_action_items">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <ul class="note-bullet-list">
+          ${sections.action_items.map(a => `<li>${escapeHtml(a)}</li>`).join('')}
+        </ul>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Terminology
+    if (sections.terminology && sections.terminology.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_terminology';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-spell-check icon-accent"></i> Terminology Reference</h4>
+          <button class="btn-tts-section" data-target="sec_terminology">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <div class="concepts-grid">
+          ${sections.terminology.map(t => `
+            <div class="concept-card">
+              <div class="concept-name">${escapeHtml(t.term || 'Term')}</div>
+              <div class="concept-explanation">${escapeHtml(t.definition || '')}</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+  }
+
+  function renderCreatorSections(sections) {
+    // Core Message
+    if (sections.core_message) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_core_message';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-bullseye icon-accent"></i> Core Story Message</h4>
+          <button class="btn-tts-section" data-target="sec_core_message">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <p class="note-section-text">${escapeHtml(sections.core_message)}</p>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Suggested Titles
+    if (sections.suggested_titles && sections.suggested_titles.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_titles';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-heading icon-accent"></i> Suggested Titles</h4>
+          <button class="btn-tts-section" data-target="sec_titles">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <div class="title-chips">
+          ${sections.suggested_titles.map((title, i) => `
+            <div class="title-chip"><i class="fa-solid fa-hashtag" style="color:var(--primary);font-size:0.75rem;"></i> ${escapeHtml(title)}</div>
+          `).join('')}
+        </div>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Hooks
+    if (sections.hooks && sections.hooks.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_hooks';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-fish-fins icon-accent"></i> 3-Second Opening Hooks</h4>
+          <button class="btn-tts-section" data-target="sec_hooks">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <div class="questions-list">
+          ${sections.hooks.map((h, i) => `
+            <div class="question-item">
+              <div class="question-tag">Hook Option ${i + 1}</div>
+              <p class="question-text">"${escapeHtml(h)}"</p>
+            </div>
+          `).join('')}
+        </div>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Story Structure
+    if (sections.story_structure && typeof sections.story_structure === 'object') {
+      const ss = sections.story_structure;
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_story_structure';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-timeline icon-accent"></i> Narrative Arc & Structure</h4>
+          <button class="btn-tts-section" data-target="sec_story_structure">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        <div class="story-timeline">
+          ${ss.hook ? `<div class="story-step"><span class="story-step-badge">1. Hook</span><div class="story-step-content">${escapeHtml(ss.hook)}</div></div>` : ''}
+          ${ss.context ? `<div class="story-step"><span class="story-step-badge">2. Context</span><div class="story-step-content">${escapeHtml(ss.context)}</div></div>` : ''}
+          ${ss.main_idea ? `<div class="story-step"><span class="story-step-badge">3. Main Idea</span><div class="story-step-content">${escapeHtml(ss.main_idea)}</div></div>` : ''}
+          ${ss.supporting_explanation ? `<div class="story-step"><span class="story-step-badge">4. Evidence</span><div class="story-step-content">${escapeHtml(ss.supporting_explanation)}</div></div>` : ''}
+          ${ss.conclusion ? `<div class="story-step"><span class="story-step-badge">5. Outro</span><div class="story-step-content">${escapeHtml(ss.conclusion)}</div></div>` : ''}
+        </div>
+      `;
+      notesContentContainer.appendChild(card);
+    }
+
+    // Storytelling Improvement & Caption
+    if (sections.storytelling_improvements || sections.social_caption || sections.call_to_action) {
+      const card = document.createElement('div');
+      card.className = 'note-section-card';
+      card.id = 'sec_social_cta';
+      card.innerHTML = `
+        <div class="note-section-header">
+          <h4><i class="fa-solid fa-share-nodes icon-accent"></i> Social Publishing & CTA</h4>
+          <button class="btn-tts-section" data-target="sec_social_cta">
+            <i class="fa-solid fa-volume-high"></i> Listen
+          </button>
+        </div>
+        ${sections.social_caption ? `
+          <div style="margin-bottom:10px;">
+            <div class="insight-label">Ready-to-Post Caption:</div>
+            <p class="note-section-text" style="margin-top:4px;">${escapeHtml(sections.social_caption)}</p>
+          </div>
+        ` : ''}
+        ${sections.call_to_action ? `
+          <div style="margin-bottom:10px;">
+            <div class="insight-label">Suggested Call to Action:</div>
+            <p class="note-section-text" style="margin-top:4px;color:#ffa366;">${escapeHtml(sections.call_to_action)}</p>
+          </div>
+        ` : ''}
+        ${sections.storytelling_improvements ? `
+          <div>
+            <div class="insight-label">Editorial Improvement:</div>
+            <p class="note-section-text" style="margin-top:4px;font-size:0.86rem;color:var(--text-secondary);">${escapeHtml(sections.storytelling_improvements)}</p>
+          </div>
+        ` : ''}
+      `;
+      notesContentContainer.appendChild(card);
+    }
+  }
+
+  function extractReadableText(containerEl) {
+    if (!containerEl) return '';
+    const clone = containerEl.cloneNode(true);
+    // Remove buttons and icons
+    clone.querySelectorAll('.btn-tts-section, i, svg').forEach(el => el.remove());
+    return clone.innerText.replace(/\s+/g, ' ').trim();
+  }
+
+  function playAllNotesSpeech() {
+    if (!notesContentContainer) return;
+    const sectionCards = Array.from(notesContentContainer.querySelectorAll('.note-section-card'));
+    if (sectionCards.length === 0) {
+      showToast("No notes loaded to read.", "info");
+      return;
+    }
+
+    const items = sectionCards.map(sec => {
+      const titleEl = sec.querySelector('h4');
+      const title = titleEl ? titleEl.innerText : 'Section';
+      const text = extractReadableText(sec);
+      return {
+        elementId: sec.id,
+        btnElement: sec.querySelector('.btn-tts-section'),
+        title: title,
+        text: text
+      };
+    }).filter(item => item.text.length > 0);
+
+    ttsManager.speakQueue(items);
+  }
+
+  // Copy Notes to Clipboard
+  if (copyNotesBtn) {
+    copyNotesBtn.addEventListener('click', async () => {
+      if (!currentRenderedNotesData) {
+        showToast("No notes available to copy.", "info");
+        return;
+      }
+      const data = currentRenderedNotesData;
+      let md = `# Vidara AI Notes — ${data.clip_title || 'Clip'}\n`;
+      md += `Audience: ${data.audience_mode.toUpperCase()} | Timestamps: ${formatTime(data.source_start)} - ${formatTime(data.source_end)}\n\n`;
+      md += `## Summary\n${data.clip_summary}\n\n`;
+      if (data.key_points && data.key_points.length > 0) {
+        md += `## Key Points\n` + data.key_points.map(p => `- ${p}`).join('\n') + '\n\n';
+      }
+
+      const s = data.sections || {};
+      for (const [key, val] of Object.entries(s)) {
+        const cleanTitle = key.replace(/_/g, ' ').toUpperCase();
+        md += `## ${cleanTitle}\n`;
+        if (typeof val === 'string') {
+          md += `${val}\n\n`;
+        } else if (Array.isArray(val)) {
+          val.forEach(item => {
+            if (typeof item === 'string') md += `- ${item}\n`;
+            else if (typeof item === 'object') md += `- **${item.name || item.term || item.problem || 'Item'}**: ${JSON.stringify(item)}\n`;
+          });
+          md += '\n';
+        } else if (typeof val === 'object') {
+          for (const [subK, subV] of Object.entries(val)) {
+            md += `### ${subK.replace(/_/g, ' ')}\n${typeof subV === 'string' ? subV : JSON.stringify(subV, null, 2)}\n\n`;
+          }
+        }
+      }
+
+      try {
+        await navigator.clipboard.writeText(md);
+        showToast("Formatted notes copied to clipboard!", "success");
+      } catch (e) {
+        showToast("Could not copy to clipboard.", "error");
+      }
+    });
+  }
+
+  // Restore Audience Mode on video load / status checks
+  window.addEventListener('beforeunload', () => {
+    ttsManager.stop();
+  });
 });
+

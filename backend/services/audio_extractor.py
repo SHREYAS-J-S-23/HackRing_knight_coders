@@ -22,6 +22,7 @@ class AudioExtractor:
         cmd = [
             ffmpeg_bin,
             "-y",                # Overwrite output if exists
+            "-threads", "0",     # Multithreaded extraction for maximum CPU throughput
             "-i", str(video_path),
             "-vn",               # Disable video recording
             "-acodec", "libmp3lame",
@@ -39,6 +40,7 @@ class AudioExtractor:
                 cmd_silent = [
                     ffmpeg_bin,
                     "-y",
+                    "-threads", "0",
                     "-f", "lavfi",
                     "-i", "anullsrc=r=16000:cl=mono",
                     "-t", str(max(1.0, duration)),
@@ -56,7 +58,7 @@ class AudioExtractor:
     @staticmethod
     def split_audio(
         audio_path: Path,
-        chunk_duration: float = 300.0,
+        chunk_duration: float = 600.0,
         overlap: float = 2.0
     ) -> list:
         """
@@ -68,9 +70,10 @@ class AudioExtractor:
         ffmpeg_bin = get_ffmpeg_executable()
         total_duration = AudioExtractor.get_audio_duration(audio_path)
         
-        # If already short and under 20MB, no need to split
+        # Groq Whisper accepts up to 25MB files. At 32kbps mono MP3, 30 mins is ~7MB, 60 mins is ~14MB.
+        # If already under 22MB and <= 1800s, skip chunking entirely for instant single-shot STT.
         file_size_mb = audio_path.stat().st_size / (1024 * 1024) if audio_path.exists() else 0.0
-        if total_duration <= chunk_duration and file_size_mb < 20.0:
+        if (total_duration <= chunk_duration or total_duration <= 1800.0) and file_size_mb < 22.0:
             return [(audio_path, 0.0)]
 
         chunks = []

@@ -79,11 +79,16 @@ def init_db():
     );
     """)
 
-    # Ensure user_id column exists if table was created previously
+    # Ensure user_id and audience_mode columns exist if table was created previously
     try:
         cursor.execute("ALTER TABLE videos ADD COLUMN user_id TEXT;")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE videos ADD COLUMN audience_mode TEXT DEFAULT 'education';")
+    except Exception:
+        pass
+
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS transcript_segments (
@@ -233,6 +238,21 @@ def init_db():
     );
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS clip_notes (
+        id TEXT PRIMARY KEY,
+        clip_id TEXT NOT NULL,
+        video_id TEXT NOT NULL,
+        user_id TEXT,
+        audience_mode TEXT NOT NULL,
+        notes_json TEXT NOT NULL,
+        model_metadata TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(clip_id, audience_mode)
+    );
+    """)
+
     # Performance optimization: Database Indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_segments_vid ON transcript_segments(video_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_segments_vid_time ON transcript_segments(video_id, start_time);")
@@ -241,6 +261,8 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_vid ON analysis_jobs(video_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON analysis_jobs(status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_chunks_vid ON transcript_chunks(video_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_clip_notes_lookup ON clip_notes(clip_id, audience_mode);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_clip_notes_vid ON clip_notes(video_id);")
 
     conn.commit()
     conn.close()
@@ -250,12 +272,12 @@ init_db()
 
 class DatabaseService:
     @staticmethod
-    def save_video(video_id: str, filename: str, filepath: str, audio_path: str = "", duration: float = 0.0, filesize: int = 0, user_id: Optional[str] = None) -> None:
+    def save_video(video_id: str, filename: str, filepath: str, audio_path: str = "", duration: float = 0.0, filesize: int = 0, user_id: Optional[str] = None, audience_mode: str = "education") -> None:
         conn = get_db_connection()
         conn.execute("""
-            INSERT OR REPLACE INTO videos (id, user_id, filename, filepath, audio_path, duration, filesize, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (video_id, user_id, filename, filepath, audio_path, duration, filesize, time.time()))
+            INSERT OR REPLACE INTO videos (id, user_id, filename, filepath, audio_path, duration, filesize, audience_mode, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (video_id, user_id, filename, filepath, audio_path, duration, filesize, audience_mode, time.time()))
         conn.commit()
         conn.close()
 
@@ -293,19 +315,26 @@ class DatabaseService:
 
     @staticmethod
     def get_video(video_id: str) -> Optional[Dict[str, Any]]:
+        conn = get_db_connection()
+        row = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+        conn.close()
+        local_data = dict(row) if row else None
+
         if is_supabase_configured():
             try:
                 from backend.services.supabase_service import SupabaseDbService
                 supa_vid = SupabaseDbService.get_video(video_id)
                 if supa_vid:
+                    if local_data:
+                        if "audience_mode" in local_data:
+                            supa_vid["audience_mode"] = local_data["audience_mode"]
+                        if not supa_vid.get("user_id") and local_data.get("user_id"):
+                            supa_vid["user_id"] = local_data["user_id"]
                     return supa_vid
             except Exception as e:
                 print(f"Warning: Supabase get_video error: {e}")
 
-        conn = get_db_connection()
-        row = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
-        conn.close()
-        return dict(row) if row else None
+        return local_data
 
     @staticmethod
     def save_segments(video_id: str, segments: List[Dict[str, Any]]) -> None:
@@ -594,12 +623,12 @@ class DatabaseService:
                 c["id"],
                 video_id,
                 c.get("topic_id"),
-                c["clip_index"],
-                c["filename"],
-                c["filepath"],
-                c["start_time"],
-                c["end_time"],
-                c["duration"],
+                c.get("clip_index", 1),
+                c.get("filename", ""),
+                c.get("filepath", ""),
+                c.get("start_time", 0.0),
+                c.get("end_time", 0.0),
+                c.get("duration", 0.0),
                 c.get("text", ""),
                 1 if c.get("is_selected", True) else 0,
                 c.get("download_url", ""),
@@ -648,6 +677,54 @@ class DatabaseService:
             d["reason"] = d.get("reason", "")
             results.append(d)
         return results
+
+    @staticmethod
+    def save_clip_notes(
+        clip_id: str,
+        video_id: str,
+        user_id: Optional[str] = None,
+        audience_mode: str = "education",
+        notes_data: Optional[Dict[str, Any]] = None,
+        model_metadata: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        import uuid
+        data = notes_data if notes_data is not None else kwargs.get("notes_json", {})
+        conn = get_db_connection()
+        now = time.time()
+        note_id = str(uuid.uuid4())[:12]
+        notes_json = json.dumps(data)
+        meta_json = json.dumps(model_metadata or {})
+        conn.execute("""
+            INSERT INTO clip_notes (id, clip_id, video_id, user_id, audience_mode, notes_json, model_metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(clip_id, audience_mode) DO UPDATE SET
+                notes_json = excluded.notes_json,
+                model_metadata = excluded.model_metadata,
+                updated_at = excluded.updated_at
+        """, (note_id, clip_id, video_id, user_id, audience_mode, notes_json, meta_json, now, now))
+        conn.commit()
+        conn.close()
+        return data
+
+    @staticmethod
+    def get_clip_notes(clip_id: str, audience_mode: str) -> Optional[Dict[str, Any]]:
+        conn = get_db_connection()
+        row = conn.execute("""
+            SELECT * FROM clip_notes WHERE clip_id = ? AND audience_mode = ?
+        """, (clip_id, audience_mode)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            parsed = json.loads(d["notes_json"])
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        return None
+
 
     @staticmethod
     def set_job(
@@ -971,6 +1048,7 @@ class DatabaseService:
         conn.execute("DELETE FROM transcript_chunks WHERE video_id = ?", (video_id,))
         conn.execute("DELETE FROM user_queries WHERE video_id = ?", (video_id,))
         conn.execute("DELETE FROM saved_clips WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM clip_notes WHERE video_id = ?", (video_id,))
         conn.commit()
         conn.close()
 

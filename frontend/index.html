@@ -70,7 +70,6 @@
     <div class="hero-banner">
       <div class="hero-badge"><i class="fa-solid fa-brain-circuit"></i> AI VIDEO INTELLIGENCE PLATFORM</div>
       <h2>Understand Long-Form Video. Instantly.</h2>
-      <p class="hero-subtitle">Upload 1–2hr+ podcasts, lectures, or interviews. Ask for any concept by voice or text, or let Vidara autonomously discover and rank the moments that matter.</p>
     </div>
 
     <!-- PIPELINE PROGRESS INDICATOR -->
@@ -83,7 +82,6 @@
         <div class="step-info">
           <div class="step-stage-tag">STAGE 01 // AUDIO INGEST</div>
           <h4>Whisper STT Extraction</h4>
-          <p>16kHz audio stream & timestamped word-level transcript</p>
         </div>
       </div>
       <div class="step-divider"><i class="fa-solid fa-angle-right"></i></div>
@@ -95,7 +93,6 @@
         <div class="step-info">
           <div class="step-stage-tag">STAGE 02 // SEMANTIC GRAPH</div>
           <h4>Topic Graph Indexing</h4>
-          <p>Hierarchical concept clustering & vector representations</p>
         </div>
       </div>
       <div class="step-divider"><i class="fa-solid fa-angle-right"></i></div>
@@ -107,7 +104,6 @@
         <div class="step-info">
           <div class="step-stage-tag">STAGE 03 // INFERENCE ENGINE</div>
           <h4>Intent & Topic Reasoning</h4>
-          <p>Autonomous discovery & conversational voice/text retrieval</p>
         </div>
       </div>
       <div class="step-divider"><i class="fa-solid fa-angle-right"></i></div>
@@ -119,7 +115,6 @@
         <div class="step-info">
           <div class="step-stage-tag">STAGE 04 // CLIP ASSEMBLY</div>
           <h4>Deterministic Video Cuts</h4>
-          <p>Lossless frame-accurate FFmpeg cuts & highlight stitching</p>
         </div>
       </div>
     </section>
@@ -194,6 +189,19 @@
           </div>
         </div>
 
+        <!-- Audience Mode Selector (Who are these clips for?) -->
+        <!-- Audience Mode Selector (Dropdown Only) -->
+        <div class="audience-mode-bar" id="audienceModeContainer">
+          <div class="audience-select-wrap">
+            <select id="audienceModeSelect" class="form-select audience-select" aria-label="Audience Mode">
+              <option value="education" selected>Education — Learn, revise and practice</option>
+              <option value="professional">Professional — Understand technical details and industry applications</option>
+              <option value="content_creator">Content Creator — Turn insights into engaging storytelling material</option>
+            </select>
+            <i class="fa-solid fa-chevron-down audience-chevron"></i>
+          </div>
+        </div>
+
         <!-- Selected Video Status Card -->
         <div class="video-preview-bar hidden" id="videoPreviewBar">
           <div class="file-details">
@@ -244,24 +252,22 @@
       </div>
     </section>
 
-    <!-- UNIFIED ASK VIDARA COMMAND CENTER -->
+    <!-- UNIFIED USER PREFERENCE COMMAND CENTER -->
     <section class="card modes-section" id="modesSection">
       <div class="card-header">
         <div class="header-title">
-          <i class="fa-solid fa-bullseye icon-accent"></i>
-          <h2>Ask About This Video</h2>
+          <i class="fa-solid fa-sliders icon-accent"></i>
+          <h2>User Preference</h2>
         </div>
         <span class="badge badge-success">Natural Language & Voice Search</span>
       </div>
 
       <div class="card-body">
         <div class="unified-ask-container">
-          <p class="section-desc">Ask Vidara to find any concept, topic, or argument in the video. Speak or type in plain English—no exact keywords required.</p>
-          
           <div class="ask-input-box">
             <div class="ask-input-wrapper">
               <i class="fa-solid fa-magnifying-glass search-icon"></i>
-              <input type="text" id="queryTextInput" name="video_concept_search" class="form-input ask-input" placeholder="e.g. Find where the speaker explains assets vs liabilities, or key advice..." autocomplete="off" spellcheck="false" />
+              <input type="text" id="queryTextInput" name="video_concept_search" class="form-input ask-input" placeholder="Specify concepts, topics, or moments you prefer to extract..." autocomplete="off" spellcheck="false" />
               <button type="button" id="voiceQueryBtn" class="btn-mic" title="Ask by Voice">
                 <i class="fa-solid fa-microphone"></i>
               </button>
@@ -271,15 +277,7 @@
               <span class="mic-pulsing"></span> Listening... speak your question now
             </div>
 
-            <div class="ask-sample-prompts">
-              <span>Suggested:</span>
-              <button class="sample-prompt-tag" data-query="Find key takeaways and conclusions">Key Takeaways</button>
-              <button class="sample-prompt-tag" data-query="Show me the core breakdown and advice">Core Advice</button>
-              <button class="sample-prompt-tag" data-query="Find the most stressed points">Main Arguments</button>
-              <button class="sample-prompt-tag" data-query="Extract all top moments">All Highlights</button>
-            </div>
-
-            <div class="ask-action-row" style="margin-top: 6px;">
+            <div class="ask-action-row" style="margin-top: 10px;">
               <button id="submitQueryBtn" class="btn-action" style="width: 100%;">
                 <i class="fa-solid fa-arrow-right"></i> Search Video Moments
               </button>
@@ -487,26 +485,6 @@
                 <span class="val text-green" id="metricRepurposedDuration">--:--</span>
               </div>
             </div>
-
-            <div class="compression-callout">
-              <div class="comp-icon"><i class="fa-solid fa-compress"></i></div>
-              <div>
-                <strong id="metricCompression">Context-Preserving Compression</strong>
-                <p id="metricCompressionDetail">Complete topic boundaries preserved with +80ms lead-in, +160ms tail-out, and zero syllable clipping.</p>
-              </div>
-            </div>
-
-            <div class="safety-banner" id="safetyBanner">
-              <div class="safety-icon"><i class="fa-solid fa-shield-halved"></i></div>
-              <div class="safety-content">
-                <h4 id="safetyTitle">Zero Distortion Guarantee: Active</h4>
-                <p id="safetyDesc">All 8 editorial integrity checks passed (no severed caveats, polarity preserved, pronoun binding valid).</p>
-              </div>
-              <div class="faithfulness-score">
-                <span class="score-num" id="faithfulnessScore">100%</span>
-                <span class="score-label">Fidelity Score</span>
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -604,6 +582,24 @@
             </button>
           </form>
 
+          <div class="auth-divider">
+            <span>OR</span>
+          </div>
+
+          <button type="button" id="googleLoginBtn" class="btn-google btn-block">
+            <svg class="google-icon" viewBox="0 0 24 24" width="18" height="18">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+            </svg>
+            Continue with Google
+          </button>
+
+          <button type="button" id="guestContinueBtn" class="btn-guest btn-block">
+            <i class="fa-solid fa-user-astronaut"></i> Continue as Guest Creator
+          </button>
+
           <div class="auth-switch-text">
             Don't have an account? <a href="#" id="linkToSignUp" class="auth-link-bold">Sign up</a>
           </div>
@@ -650,6 +646,20 @@
               <i class="fa-solid fa-user-plus"></i> Create Account
             </button>
           </form>
+
+          <div class="auth-divider">
+            <span>OR</span>
+          </div>
+
+          <button type="button" id="googleSignupBtn" class="btn-google btn-block">
+            <svg class="google-icon" viewBox="0 0 24 24" width="18" height="18">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+            </svg>
+            Sign up with Google
+          </button>
 
           <div class="auth-switch-text">
             Already have an account? <a href="#" id="linkToLogin" class="auth-link-bold">Sign in</a>
@@ -804,6 +814,89 @@
             <h4>No Video Projects Found</h4>
             <p>Upload a video or paste a YouTube URL to automatically save projects to your profile.</p>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI NOTES & TEXT-TO-SPEECH MODAL -->
+  <div class="modal-backdrop hidden" id="clipNotesModal">
+    <div class="modal-box notes-modal-box">
+      <div class="modal-header notes-modal-header">
+        <div class="notes-header-left">
+          <div class="notes-icon-badge"><i class="fa-solid fa-book-open-reader"></i></div>
+          <div>
+            <div class="notes-title-row">
+              <h3 id="notesClipTitle">Clip Notes</h3>
+              <span class="badge badge-accent" id="notesAudienceBadge">Education Mode</span>
+            </div>
+            <span class="notes-meta-sub" id="notesClipMeta">00:00 — 00:00 • Source Verified</span>
+          </div>
+        </div>
+        <div class="notes-header-right">
+          <button id="copyNotesBtn" class="btn-ghost btn-sm" title="Copy formatted notes to clipboard">
+            <i class="fa-regular fa-copy"></i> Copy Notes
+          </button>
+          <button id="closeNotesModalBtn" class="modal-close" aria-label="Close notes">&times;</button>
+        </div>
+      </div>
+
+      <!-- Mode Switcher Tabs Inside Modal -->
+      <div class="notes-mode-bar">
+        <span class="notes-mode-label">Audience Focus:</span>
+        <div class="notes-mode-pills">
+          <button type="button" class="notes-mode-pill active" data-mode="education" id="notesModeEduBtn">
+            <i class="fa-solid fa-graduation-cap"></i> Education
+          </button>
+          <button type="button" class="notes-mode-pill" data-mode="professional" id="notesModeProBtn">
+            <i class="fa-solid fa-briefcase"></i> Professional
+          </button>
+          <button type="button" class="notes-mode-pill" data-mode="content_creator" id="notesModeCreatorBtn">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> Content Creator
+          </button>
+        </div>
+      </div>
+
+      <!-- Master Audio / TTS Player Bar -->
+      <div class="notes-tts-bar" id="notesTtsBar">
+        <div class="tts-controls-left">
+          <button type="button" id="ttsPlayAllBtn" class="btn-primary btn-sm tts-main-btn">
+            <i class="fa-solid fa-play"></i> Listen to Notes
+          </button>
+          <button type="button" id="ttsPauseBtn" class="btn-ghost btn-sm hidden">
+            <i class="fa-solid fa-pause"></i> Pause
+          </button>
+          <button type="button" id="ttsStopBtn" class="btn-ghost btn-sm hidden">
+            <i class="fa-solid fa-stop"></i> Stop
+          </button>
+        </div>
+        <div class="tts-status-pill hidden" id="ttsStatusPill">
+          <span class="tts-waveform">
+            <span></span><span></span><span></span><span></span>
+          </span>
+          <span id="ttsStatusText">Reading Summary...</span>
+        </div>
+        <div class="tts-voice-options">
+          <label for="ttsRateSelect" class="tts-rate-label">Speed:</label>
+          <select id="ttsRateSelect" class="tts-rate-select">
+            <option value="0.85">0.85x</option>
+            <option value="1.0" selected>1.0x</option>
+            <option value="1.15">1.15x</option>
+            <option value="1.3">1.3x</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Modal Body (Dynamic Notes Content) -->
+      <div class="modal-body notes-modal-body" id="notesModalBody">
+        <div class="notes-loading-state hidden" id="notesLoadingState">
+          <i class="fa-solid fa-atom fa-spin notes-spinner"></i>
+          <h4>Generating Notes with Groq LPUs...</h4>
+          <p>Analyzing timestamp-aligned transcript segments and structuring key takeaways.</p>
+        </div>
+
+        <div class="notes-content-container" id="notesContentContainer">
+          <!-- Rendered dynamically via JS -->
         </div>
       </div>
     </div>

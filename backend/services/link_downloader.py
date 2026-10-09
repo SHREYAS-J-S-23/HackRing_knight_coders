@@ -33,7 +33,7 @@ class LinkDownloader:
             return False
 
     @classmethod
-    def download_video_from_url(cls, url: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    def download_video_from_url(cls, url: str, user_id: Optional[str] = None, audience_mode: str = "education") -> Dict[str, Any]:
         clean_url = url.strip()
         if not cls.is_valid_url(clean_url):
             raise ValueError("Invalid URL format. Please provide a valid http:// or https:// video link.")
@@ -56,16 +56,17 @@ class LinkDownloader:
             ffmpeg_path = get_ffmpeg_executable()
 
             ydl_opts = {
-                'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+                'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=480][ext=mp4]/bestvideo[height<=720]+bestaudio/best[height<=720]/best',
                 'outtmpl': output_template,
                 'merge_output_format': 'mp4',
                 'noplaylist': True,
                 'quiet': True,
                 'no_warnings': True,
-                'socket_timeout': 45,
-                'retries': 5,
+                'socket_timeout': 30,
+                'retries': 3,
                 'prefer_ffmpeg': True,
                 'ffmpeg_location': ffmpeg_path,
+                'concurrent_fragment_downloads': 5,
             }
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -87,7 +88,7 @@ class LinkDownloader:
                 print(f"Vidara yt-dlp primary format note: {ydl_err}. Retrying with fallback format 'best'...")
                 try:
                     ydl_opts_fallback = dict(ydl_opts)
-                    ydl_opts_fallback['format'] = 'best'
+                    ydl_opts_fallback['format'] = 'best[ext=mp4]/best'
                     with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
                         info = ydl.extract_info(clean_url, download=True)
                         if info:
@@ -136,7 +137,20 @@ class LinkDownloader:
             temp_trans = UPLOAD_DIR / f"{video_id}_temp_input{downloaded_path.suffix}"
             if downloaded_path.exists() and downloaded_path != temp_trans:
                 downloaded_path.rename(temp_trans)
-            AudioExtractor.convert_to_mp4(temp_trans, final_video_path)
+            # Try ultra-fast lossless stream copy remux into MP4 first (< 0.5s)
+            remux_cmd = [
+                get_ffmpeg_executable(), "-y", "-threads", "0",
+                "-i", str(temp_trans),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(final_video_path)
+            ]
+            remux_res = subprocess.run(remux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # If fast copy remux succeeded and created valid MP4, skip slow CPU re-encoding
+            if remux_res.returncode == 0 and final_video_path.exists() and final_video_path.stat().st_size > 1000:
+                pass
+            else:
+                AudioExtractor.convert_to_mp4(temp_trans, final_video_path)
             try:
                 temp_trans.unlink(missing_ok=True)
             except Exception:
@@ -160,7 +174,8 @@ class LinkDownloader:
             audio_path=str(audio_path),
             duration=duration,
             filesize=filesize,
-            user_id=user_id
+            user_id=user_id,
+            audience_mode=audience_mode
         )
 
         return {

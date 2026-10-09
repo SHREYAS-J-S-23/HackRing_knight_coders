@@ -41,10 +41,14 @@ from backend.models.schemas import (
     GenerateClipsRequest,
     MergeClipsRequest,
     VideoStatusResponse,
-    EnrichedTranscript
+    EnrichedTranscript,
+    ClipNotesRequest,
+    ClipNotesResponse
 )
+from backend.services.notes_service import ClipNotesService, VALID_AUDIENCE_MODES
 
 router = APIRouter(tags=["Vidara Video Intelligence"])
+
 
 # In-memory fast cache for active sessions
 VIDEO_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -130,6 +134,7 @@ def get_session_data(video_id: str, user_id: Optional[str] = None) -> Dict[str, 
         "video_path": video_path,
         "audio_path": audio_path,
         "duration": vid["duration"],
+        "audience_mode": vid.get("audience_mode", "education"),
         "transcript": transcript_obj,
         "topics": [DiscoveredTopic(**t) for t in topics] if topics else [],
         "clips": clips
@@ -169,6 +174,7 @@ def _async_sync_to_supabase_storage(
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...), 
+    audience_mode: Optional[str] = Form("education"),
     groq_api_key: Optional[str] = Form(None),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -203,6 +209,16 @@ async def upload_video(
 
         user_id = current_user["id"] if current_user else None
 
+        if audience_mode and audience_mode.strip():
+            clean_mode = audience_mode.strip().lower()
+            if clean_mode not in VALID_AUDIENCE_MODES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid audience_mode '{audience_mode}'. Valid modes: {list(VALID_AUDIENCE_MODES)}"
+                )
+        else:
+            clean_mode = "education"
+
         # Save to database immediately
         DatabaseService.save_video(
             video_id=video_id,
@@ -211,7 +227,8 @@ async def upload_video(
             audio_path=str(audio_path),
             duration=duration,
             filesize=bytes_written,
-            user_id=user_id
+            user_id=user_id,
+            audience_mode=clean_mode
         )
 
         DatabaseService.set_job(
@@ -231,6 +248,7 @@ async def upload_video(
             "video_path": str(saved_video_path),
             "audio_path": str(audio_path),
             "duration": duration,
+            "audience_mode": clean_mode,
             "transcript": None,
             "topics": [],
             "clips": []
@@ -251,7 +269,8 @@ async def upload_video(
             "video_id": video_id,
             "filename": file.filename,
             "duration_seconds": duration,
-            "filesize_bytes": bytes_written
+            "filesize_bytes": bytes_written,
+            "audience_mode": clean_mode
         }
 
     except Exception as e:
@@ -293,9 +312,20 @@ async def ingest_video_url(
 
     from backend.services.link_downloader import LinkDownloader
 
+    if req.audience_mode and req.audience_mode.strip():
+        clean_mode = req.audience_mode.strip().lower()
+        if clean_mode not in VALID_AUDIENCE_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid audience_mode '{req.audience_mode}'. Valid modes: {list(VALID_AUDIENCE_MODES)}"
+            )
+    else:
+        clean_mode = "education"
+
     try:
         user_id = current_user["id"]
-        res = await asyncio.to_thread(LinkDownloader.download_video_from_url, req.url.strip(), user_id=user_id)
+
+        res = await asyncio.to_thread(LinkDownloader.download_video_from_url, req.url.strip(), user_id=user_id, audience_mode=clean_mode)
         video_id = res["video_id"]
         filename = res["filename"]
         duration = res["duration_seconds"]
@@ -328,6 +358,7 @@ async def ingest_video_url(
             "video_path": res["filepath"],
             "audio_path": res["audio_path"],
             "duration": duration,
+            "audience_mode": clean_mode,
             "transcript": None,
             "topics": [],
             "clips": []
@@ -339,7 +370,8 @@ async def ingest_video_url(
             "filename": filename,
             "duration_seconds": duration,
             "filesize_bytes": filesize,
-            "source_url": req.url.strip()
+            "source_url": req.url.strip(),
+            "audience_mode": clean_mode
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to ingest video from link: {str(e)}")
@@ -1159,6 +1191,7 @@ async def get_job_status(
                 "retries": 0,
                 "error": None,
                 "core_thesis": vid.get("core_thesis", ""),
+                "audience_mode": vid.get("audience_mode", "education") if vid else "education",
                 "segment_count": len(segs),
                 "topic_count": len(topics),
                 "topics": topics
@@ -1187,6 +1220,7 @@ async def get_job_status(
         "retries": job.get("retries", 0),
         "error": job.get("error"),
         "core_thesis": core_thesis,
+        "audience_mode": vid.get("audience_mode", "education") if vid else "education",
         "segment_count": len(segs),
         "topic_count": len(topics),
         "topics": topics,
@@ -1442,4 +1476,133 @@ async def get_clip_selections(
     verify_video_access(video_id, current_user["id"])
     selections = DatabaseService.get_clip_selections(user_id=current_user["id"], video_id=video_id)
     return {"video_id": video_id, "selections": selections}
+
+
+# ====================================================
+# AUDIENCE-AWARE AI NOTES ENDPOINTS
+# ====================================================
+
+@router.post("/clips/{clip_id}/notes", response_model=ClipNotesResponse)
+@router.post("/videos/{video_id}/clips/{clip_id}/notes", response_model=ClipNotesResponse)
+async def generate_clip_notes_endpoint(
+    clip_id: str,
+    req: Optional[ClipNotesRequest] = None,
+    video_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Generate structured Audience-Aware AI Notes for a specific clip.
+    Extracts timestamp-aligned transcript segments and returns validated pedagogical,
+    technical, or storytelling notes, persisted in DB cache.
+    """
+    req_mode = (req.audience_mode if req else "education") or "education"
+    clean_mode = req_mode.strip().lower()
+    if clean_mode not in VALID_AUDIENCE_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid audience_mode '{req_mode}'. Must be one of: {', '.join(sorted(VALID_AUDIENCE_MODES))}"
+        )
+
+    from backend.database import get_db_connection
+    conn = get_db_connection()
+    row = None
+
+    # Try lookup in clips table
+    if video_id:
+        row = conn.execute(
+            "SELECT * FROM clips WHERE video_id = ? AND (id = ? OR topic_id = ?)",
+            (video_id, clip_id, clip_id)
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT * FROM topics WHERE video_id = ? AND id = ?",
+                (video_id, clip_id)
+            ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM clips WHERE id = ? OR topic_id = ?",
+            (clip_id, clip_id)
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT * FROM topics WHERE id = ?",
+                (clip_id,)
+            ).fetchone()
+
+    if not row:
+        clean_search = clip_id.replace(".mp4", "")
+        row = conn.execute(
+            "SELECT * FROM clips WHERE id LIKE ? OR topic_id LIKE ? LIMIT 1",
+            (f"%{clean_search}%", f"%{clean_search}%")
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT * FROM topics WHERE id LIKE ? LIMIT 1",
+                (f"%{clean_search}%",)
+            ).fetchone()
+
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Clip or topic '{clip_id}' not found.")
+
+    row_dict = dict(row)
+    resolved_vid = row_dict.get("video_id") or video_id
+    if not resolved_vid:
+        raise HTTPException(status_code=404, detail="Associated video not found for this clip.")
+
+    # Strict authorization & ownership check
+    verify_video_access(resolved_vid, current_user["id"])
+
+    start_time = float(row_dict.get("start_time", 0.0))
+    end_time = float(row_dict.get("end_time", 0.0))
+    title = row_dict.get("name") or row_dict.get("text") or "Clip Insight"
+
+    try:
+        notes = await asyncio.to_thread(
+            ClipNotesService.generate_clip_notes,
+            clip_id=clip_id,
+            video_id=resolved_vid,
+            audience_mode=clean_mode,
+            clip_title=title,
+            start_time=start_time,
+            end_time=end_time,
+            user_id=current_user["id"]
+        )
+        return notes
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate clip notes: {str(e)}")
+
+
+@router.get("/clips/{clip_id}/notes", response_model=ClipNotesResponse)
+@router.get("/videos/{video_id}/clips/{clip_id}/notes", response_model=ClipNotesResponse)
+async def get_clip_notes_endpoint(
+    clip_id: str,
+    audience_mode: Optional[str] = "education",
+    video_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Retrieves cached AI notes for a clip, or generates them on demand."""
+    clean_mode = (audience_mode or "education").strip().lower()
+    if clean_mode not in VALID_AUDIENCE_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid audience_mode '{audience_mode}'. Must be one of: {', '.join(sorted(VALID_AUDIENCE_MODES))}"
+        )
+
+    cached = DatabaseService.get_clip_notes(clip_id, clean_mode)
+    if cached:
+        cached_vid = cached.get("video_id") or video_id
+        if cached_vid:
+            verify_video_access(cached_vid, current_user["id"])
+        return cached
+
+    req = ClipNotesRequest(audience_mode=clean_mode)
+    return await generate_clip_notes_endpoint(
+        clip_id=clip_id,
+        req=req,
+        video_id=video_id,
+        current_user=current_user
+    )
+
 
