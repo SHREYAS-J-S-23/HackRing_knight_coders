@@ -625,10 +625,11 @@ async def get_analyze_result(
 
     status = job.get("status", "")
     job_type = job.get("job_type", "")
+    stage = job.get("stage") or job.get("current_stage", "")
     if status == "failed":
         raise HTTPException(status_code=500, detail=f"Analysis failed: {job.get('message', 'Unknown error')}")
 
-    if status != "completed" or job_type not in ("indexing", "analysis"):
+    if status != "completed" or stage in ("Audio Extracted", "Media ingestion"):
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=202,
@@ -636,7 +637,7 @@ async def get_analyze_result(
                 "status": status,
                 "job_type": job_type,
                 "progress": job.get("progress", 0),
-                "stage": job.get("stage") or job.get("current_stage", "Processing"),
+                "stage": stage or "Processing",
                 "message": job.get("message", "Still processing...")
             }
         )

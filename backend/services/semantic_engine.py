@@ -97,7 +97,7 @@ class SemanticEngine:
                         {"role": "user", "content": prompt}
                     ],
                     response_format={"type": "json_object"},
-                    max_tokens=850,
+                    max_tokens=2000,
                     temperature=0.1
                 )
                 content = response.choices[0].message.content or ""
@@ -119,7 +119,7 @@ class SemanticEngine:
                         {"role": "system", "content": f"{system_prompt} Return ONLY raw, valid JSON. Do not wrap in markdown or include conversational text."},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=850,
+                    max_tokens=2000,
                     temperature=0.1
                 )
                 content = response.choices[0].message.content or ""
@@ -380,7 +380,7 @@ Return STRICTLY a JSON object matching this schema:
   ]
 }}
 """
-        candidate_models = [primary_model, fallback_model, "qwen/qwen3.8-27b"]
+        candidate_models = [primary_model, fallback_model, "openai/gpt-oss-20b"]
         data = self._call_llm_json(
             client=client,
             prompt=prompt,
@@ -524,7 +524,7 @@ Return STRICTLY a JSON object with this format:
   ]
 }}
 """
-        candidate_models = [model, fallback_model, "qwen/qwen3.8-27b"]
+        candidate_models = [model, fallback_model, "openai/gpt-oss-20b"]
         data = self._call_llm_json(
             client=client,
             prompt=prompt,
